@@ -5,7 +5,7 @@ LLM-as-judge — and compare **accuracy, latency, and cost** side by side. Eval
 literacy is the difference between "I built with LLMs" and "I watched tutorials";
 this is the tool I use to prove which model/prompt combination actually works.
 
-**Live demo:** _coming soon_
+**Live demo:** https://evalboard-zeta.vercel.app (per-visitor daily case budget)
 
 ## How it works
 
