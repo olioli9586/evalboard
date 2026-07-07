@@ -1,26 +1,59 @@
 @import "tailwindcss";
 
+/* EvalBoard design tokens — "calibration lab"
+   Light instrument-panel surface; verdicts read like a test strip. */
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  --bench: #f4f4ee; /* page background */
+  --card: #ffffff;
+  --ink: #16191b;
+  --muted: #6e7378;
+  --rule: #dddccf;
+  --cal: #2247d6; /* calibration blue */
+  --pass: #1e7f4f;
+  --fail: #c23934;
 }
 
 @theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
-}
-
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
+  --color-bench: var(--bench);
+  --color-card: var(--card);
+  --color-ink: var(--ink);
+  --color-muted: var(--muted);
+  --color-rule: var(--rule);
+  --color-cal: var(--cal);
+  --color-pass: var(--pass);
+  --color-fail: var(--fail);
+  --font-sans: var(--font-body);
+  --font-display: var(--font-display-face);
+  --font-mono: var(--font-data);
 }
 
 body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  background: var(--bench);
+  color: var(--ink);
+  font-family: var(--font-body), sans-serif;
+}
+
+/* Graph-paper grid for the header band */
+.graph-paper {
+  background-image:
+    linear-gradient(to right, rgba(34, 71, 214, 0.07) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(34, 71, 214, 0.07) 1px, transparent 1px);
+  background-size: 28px 28px;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .cell-pop {
+    animation: cell-pop 0.25s ease-out both;
+  }
+}
+
+@keyframes cell-pop {
+  from {
+    transform: scale(0.5);
+    opacity: 0;
+  }
+  to {
+    transform: scale(1);
+    opacity: 1;
+  }
 }

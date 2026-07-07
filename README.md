@@ -1,36 +1,67 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# EvalBoard — LLM Evaluation Bench
 
-## Getting Started
+Run a dataset against multiple Claude models, grade every output — exact match or
+LLM-as-judge — and compare **accuracy, latency, and cost** side by side. Eval
+literacy is the difference between "I built with LLMs" and "I watched tutorials";
+this is the tool I use to prove which model/prompt combination actually works.
 
-First, run the development server:
+**Live demo:** _coming soon_
 
-```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+## How it works
+
+```
+Browser ── one POST per (model × case) ──▶ /api/run-case
+             (client-side worker pool,          │
+              concurrency 3)                    ├─ 1. target model completes the case
+                                                ├─ 2. grader scores it:
+                                                │    · exact  — normalized string equality
+                                                │    · judge  — Opus 4.8 verdict, strict JSON schema
+                                                └─ 3. returns {output, pass, reasoning,
+                                                     latency, tokens, cost}
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+- **Datasets**: two built-in samples (classification with exact match; extraction
+  with LLM judge) or paste your own as `input | expected` lines.
+- **The readout**: per-model scorecards — pass rate, a test strip (one square per
+  case, click to inspect), average latency, total cost.
+- **Case detail**: input, expected, output, judge reasoning, and telemetry.
+- **Export**: full run as JSON.
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+## Design decisions
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+- **LLM-as-judge with a structured verdict.** The judge returns
+  `{pass, reasoning}` constrained by a strict JSON schema (`output_config.format`),
+  so grades always parse. Reasoning is stored, not discarded — you can audit why
+  a case failed.
+- **Exact match is normalized** (case, trailing punctuation) — classification
+  evals shouldn't fail on "Billing." vs "billing".
+- **Client-side worker pool** (concurrency 3) instead of one long server job:
+  every case is an independent short request, so results stream into the UI as
+  they land, failures are isolated per-cell, and nothing fights serverless
+  execution limits.
+- **Cost is a first-class metric.** Every result carries token counts and a
+  dollar figure computed from a price table; the scorecard totals them. Model
+  choice is an economics question, not just an accuracy question.
+- **Model fallback**: if a requested model returns 404 (retired), the case
+  transparently reruns on `claude-opus-4-8` and the result records which model
+  actually served it.
+- **Demo guardrails**: per-IP daily case budget, case/input length caps.
 
-## Learn More
+## Run locally
 
-To learn more about Next.js, take a look at the following resources:
+```bash
+npm install
+cp .env.example .env.local   # add your ANTHROPIC_API_KEY
+npm run dev
+```
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+## Tech
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+Next.js 16 (App Router) · TypeScript · Tailwind CSS · Anthropic SDK · Vercel
 
-## Deploy on Vercel
+## Roadmap
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
-
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+- [ ] Persist runs to Postgres and diff two runs (regression view)
+- [ ] Prompt variants: A/B two system prompts on the same dataset
+- [ ] CSV dataset upload
+- [ ] Statistical significance hints for small datasets
