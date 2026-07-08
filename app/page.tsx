@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   MODELS,
   SAMPLES,
@@ -8,6 +8,14 @@ import {
   type EvalCase,
   type GraderKind,
 } from "@/lib/eval";
+import {
+  deleteRun,
+  loadRuns,
+  saveRun,
+  transition,
+  type SavedRun,
+  type Transition,
+} from "@/lib/history";
 
 type Cell =
   | { status: "idle" }
@@ -33,6 +41,12 @@ export default function Home() {
   const [running, setRunning] = useState(false);
   const [runError, setRunError] = useState("");
   const [detail, setDetail] = useState<{ model: string; idx: number } | null>(null);
+  const [runs, setRuns] = useState<SavedRun[]>([]);
+  const [diffPick, setDiffPick] = useState<string[]>([]); // up to 2 run ids
+
+  useEffect(() => {
+    setRuns(loadRuns());
+  }, []);
 
   const cases: EvalCase[] = useMemo(() => {
     if (datasetIdx >= 0) return SAMPLES[datasetIdx].cases;
@@ -93,8 +107,10 @@ export default function Home() {
           });
           const data = await res.json();
           if (!res.ok) throw new Error(data.error ?? `HTTP ${res.status}`);
+          fresh[job.model][job.idx] = { status: "done", r: data };
           setGrid((g) => setCell(g, job.model, job.idx, { status: "done", r: data }));
         } catch (err) {
+          fresh[job.model][job.idx] = { status: "error", error: (err as Error).message };
           setGrid((g) =>
             setCell(g, job.model, job.idx, { status: "error", error: (err as Error).message }),
           );
@@ -107,6 +123,35 @@ export default function Home() {
     }
     await Promise.all(Array.from({ length: CONCURRENCY }, worker));
     setRunning(false);
+
+    // Record the run for history/diffing.
+    const models: SavedRun["models"] = {};
+    for (const m of selectedModels) {
+      const cells = fresh[m];
+      const done = cells.filter((c) => c.status === "done") as Extract<Cell, { status: "done" }>[];
+      models[m] = {
+        passes: cells.map((c) => (c.status === "done" ? c.r.pass : null)),
+        passRate: done.length
+          ? Math.round((done.filter((c) => c.r.pass).length / done.length) * 100)
+          : 0,
+        avgMs: done.length
+          ? Math.round(done.reduce((s, c) => s + c.r.latency_ms, 0) / done.length)
+          : 0,
+        cost: done.reduce((s, c) => s + c.r.cost_usd, 0),
+      };
+    }
+    setRuns(
+      saveRun({
+        id: crypto.randomUUID(),
+        at: new Date().toISOString(),
+        dataset: datasetIdx >= 0 ? SAMPLES[datasetIdx].name : "custom",
+        grader,
+        system,
+        caseKey: JSON.stringify(cases.map((c) => c.input)),
+        caseCount: cases.length,
+        models,
+      }),
+    );
   }
 
   function exportJson() {
@@ -349,6 +394,68 @@ export default function Home() {
           </section>
         )}
 
+        {/* Run history + diff */}
+        {runs.length > 0 && (
+          <section className="mt-14">
+            <h2 className="font-display text-lg font-bold">Run history</h2>
+            <p className="mt-1 text-[13px] text-muted">
+              Select two runs of the same dataset to diff them — the regression view.
+            </p>
+            <ul className="mt-4 space-y-2">
+              {runs.map((run) => {
+                const picked = diffPick.includes(run.id);
+                return (
+                  <li
+                    key={run.id}
+                    className={`flex flex-wrap items-center gap-x-4 gap-y-1 rounded-md border px-4 py-2.5 font-mono text-[12px] ${
+                      picked ? "border-cal bg-cal/5" : "border-rule bg-card"
+                    }`}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={picked}
+                      onChange={() =>
+                        setDiffPick((prev) =>
+                          picked ? prev.filter((id) => id !== run.id) : [...prev, run.id].slice(-2),
+                        )
+                      }
+                      className="h-3.5 w-3.5 accent-[#2247d6]"
+                      aria-label="select run for diff"
+                    />
+                    <span className="text-ink">{run.dataset}</span>
+                    <span className="text-muted">
+                      {new Date(run.at).toLocaleString("en-US", {
+                        month: "short",
+                        day: "numeric",
+                        hour: "2-digit",
+                        minute: "2-digit",
+                      })}
+                    </span>
+                    <span className="text-muted">{run.grader}</span>
+                    <span className="ml-auto text-muted">
+                      {Object.entries(run.models)
+                        .map(([m, r]) => `${m.replace("claude-", "")} ${r.passRate}%`)
+                        .join(" · ")}
+                    </span>
+                    <button
+                      onClick={() => {
+                        setRuns(deleteRun(run.id));
+                        setDiffPick((prev) => prev.filter((id) => id !== run.id));
+                      }}
+                      className="text-muted hover:text-fail"
+                      aria-label="delete run"
+                    >
+                      ✕
+                    </button>
+                  </li>
+                );
+              })}
+            </ul>
+
+            {diffPick.length === 2 && <DiffPanel runs={runs} pick={diffPick} />}
+          </section>
+        )}
+
         <footer className="mt-20 flex items-center justify-between border-t border-rule pt-5 font-mono text-[11px] text-muted">
           <span>Next.js · Claude API · structured-output judge</span>
           <a
@@ -360,6 +467,102 @@ export default function Home() {
         </footer>
       </div>
     </main>
+  );
+}
+
+const TRANSITION_STYLE: Record<Transition, { cls: string; label: string }> = {
+  "pass-pass": { cls: "bg-pass/80", label: "pass → pass" },
+  "fail-fail": { cls: "bg-rule", label: "fail → fail" },
+  fixed: { cls: "bg-cal", label: "fixed" },
+  regressed: { cls: "bg-fail", label: "regressed" },
+  ungraded: { cls: "bg-rule/40", label: "ungraded" },
+};
+
+function DiffPanel({ runs, pick }: { runs: SavedRun[]; pick: string[] }) {
+  const picked = runs.filter((r) => pick.includes(r.id));
+  if (picked.length !== 2) return null;
+  // Baseline = the older run.
+  const [base, next] = [...picked].sort((a, b) => a.at.localeCompare(b.at));
+
+  if (base.caseKey !== next.caseKey) {
+    return (
+      <p className="mt-4 rounded-md border border-rule bg-card px-4 py-3 text-[13px] text-muted">
+        These runs used different cases, so a case-by-case diff isn&apos;t meaningful.
+        Pick two runs of the same dataset.
+      </p>
+    );
+  }
+
+  const sharedModels = Object.keys(base.models).filter((m) => m in next.models);
+  const promptChanged = base.system !== next.system;
+
+  return (
+    <div className="mt-4 rounded-lg border border-cal/30 bg-card p-5">
+      <h3 className="font-display text-sm font-bold uppercase tracking-wider">
+        Diff · baseline {new Date(base.at).toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit" })}{" "}
+        → {new Date(next.at).toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit" })}
+      </h3>
+      {promptChanged && (
+        <p className="mt-2 font-mono text-[12px] text-cal">system prompt changed between runs</p>
+      )}
+
+      <div className="mt-4 space-y-4">
+        {sharedModels.length === 0 && (
+          <p className="text-[13px] text-muted">No model appears in both runs.</p>
+        )}
+        {sharedModels.map((model) => {
+          const a = base.models[model];
+          const b = next.models[model];
+          const trans = a.passes.map((p, i) => transition(p, b.passes[i]));
+          const fixed = trans.filter((t) => t === "fixed").length;
+          const regressed = trans.filter((t) => t === "regressed").length;
+          const delta = b.passRate - a.passRate;
+          return (
+            <div key={model}>
+              <div className="flex flex-wrap items-baseline gap-x-4 gap-y-1">
+                <span className="w-40 font-mono text-[13px] font-medium">
+                  {model.replace("claude-", "")}
+                </span>
+                <span className="font-display text-xl font-bold tabular-nums">
+                  {a.passRate}% → {b.passRate}%
+                </span>
+                <span
+                  className={`font-mono text-[12px] ${
+                    delta > 0 ? "text-pass" : delta < 0 ? "text-fail" : "text-muted"
+                  }`}
+                >
+                  {delta > 0 ? `+${delta}` : delta} pts
+                </span>
+                <span className="ml-auto font-mono text-[12px] text-muted">
+                  {fixed > 0 && <span className="text-cal">{fixed} fixed</span>}
+                  {fixed > 0 && regressed > 0 && " · "}
+                  {regressed > 0 && <span className="text-fail">{regressed} regressed</span>}
+                  {fixed === 0 && regressed === 0 && "no transitions"}
+                </span>
+              </div>
+              <div className="mt-2 flex gap-1">
+                {trans.map((t, i) => (
+                  <span
+                    key={i}
+                    title={`case ${i + 1}: ${TRANSITION_STYLE[t].label}`}
+                    className={`h-5 w-5 rounded-[3px] ${TRANSITION_STYLE[t].cls}`}
+                  />
+                ))}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+
+      <div className="mt-5 flex flex-wrap gap-x-4 gap-y-1 border-t border-rule pt-3 font-mono text-[11px] text-muted">
+        {(Object.keys(TRANSITION_STYLE) as Transition[]).map((t) => (
+          <span key={t} className="flex items-center gap-1.5">
+            <span className={`h-3 w-3 rounded-[2px] ${TRANSITION_STYLE[t].cls}`} />
+            {TRANSITION_STYLE[t].label}
+          </span>
+        ))}
+      </div>
+    </div>
   );
 }
 
