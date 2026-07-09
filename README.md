@@ -7,6 +7,8 @@ this is the tool I use to prove which model/prompt combination actually works.
 
 **Live demo:** https://evalboard-zeta.vercel.app (per-visitor daily case budget)
 
+![EvalBoard](docs/home.png)
+
 ## How it works
 
 ```
