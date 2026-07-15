@@ -1,29 +1,29 @@
 import type { Metadata } from "next";
-import { Instrument_Sans, JetBrains_Mono, Space_Grotesk } from "next/font/google";
+import { Public_Sans, Spline_Sans_Mono, Zilla_Slab } from "next/font/google";
 import "./globals.css";
 
-const body = Instrument_Sans({
+const body = Public_Sans({
   variable: "--font-body",
   subsets: ["latin"],
-  weight: ["400", "500", "600"],
+  weight: ["400", "500", "600", "700"],
 });
 
-const display = Space_Grotesk({
+const display = Zilla_Slab({
   variable: "--font-display-face",
   subsets: ["latin"],
-  weight: ["500", "700"],
+  weight: ["500", "600", "700"],
 });
 
-const data = JetBrains_Mono({
+const data = Spline_Sans_Mono({
   variable: "--font-data",
   subsets: ["latin"],
   weight: ["400", "500"],
 });
 
 export const metadata: Metadata = {
-  title: "EvalBoard — LLM Evaluation Bench",
+  title: "Evalboard — grade Claude models on your own cases",
   description:
-    "Run a dataset against multiple Claude models, score outputs with exact match or an LLM judge, and compare accuracy, latency, and cost.",
+    "Run a dataset against multiple Claude models, grade every answer with exact match or an LLM judge, and compare accuracy, latency, and cost.",
 };
 
 export default function RootLayout({

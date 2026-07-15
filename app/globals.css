@@ -1,25 +1,30 @@
 @import "tailwindcss";
 
-/* EvalBoard design tokens — "calibration lab"
-   Light instrument-panel surface; verdicts read like a test strip. */
+/* Evalboard design tokens — "the answer sheet"
+   Blackboard-green chrome over a sage-white desk; verdicts fill in
+   like bubbles on a machine-graded answer sheet. Red is the pen. */
 :root {
-  --bench: #f4f4ee; /* page background */
+  --desk: #eceee8; /* page background */
   --card: #ffffff;
-  --ink: #16191b;
-  --muted: #6e7378;
-  --rule: #dddccf;
-  --cal: #2247d6; /* calibration blue */
-  --pass: #1e7f4f;
-  --fail: #c23934;
+  --ink: #20241f;
+  --muted: #5b655d;
+  --line: #d5dacf;
+  --board: #14332c; /* blackboard green: chrome + primary actions */
+  --chalk: #edf3ee; /* text on board */
+  --chalk-dim: #a9bfb2;
+  --pass: #1b7a45;
+  --fail: #bd3a2b;
 }
 
 @theme inline {
-  --color-bench: var(--bench);
+  --color-desk: var(--desk);
   --color-card: var(--card);
   --color-ink: var(--ink);
   --color-muted: var(--muted);
-  --color-rule: var(--rule);
-  --color-cal: var(--cal);
+  --color-line: var(--line);
+  --color-board: var(--board);
+  --color-chalk: var(--chalk);
+  --color-chalk-dim: var(--chalk-dim);
   --color-pass: var(--pass);
   --color-fail: var(--fail);
   --font-sans: var(--font-body);
@@ -28,17 +33,9 @@
 }
 
 body {
-  background: var(--bench);
+  background: var(--desk);
   color: var(--ink);
   font-family: var(--font-body), sans-serif;
-}
-
-/* Graph-paper grid for the header band */
-.graph-paper {
-  background-image:
-    linear-gradient(to right, rgba(34, 71, 214, 0.07) 1px, transparent 1px),
-    linear-gradient(to bottom, rgba(34, 71, 214, 0.07) 1px, transparent 1px);
-  background-size: 28px 28px;
 }
 
 @media (prefers-reduced-motion: no-preference) {
