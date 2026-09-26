@@ -1,5 +1,13 @@
 import { describe, expect, it } from "vitest";
-import { cost, exactMatch, MODELS, normalizeAnswer, PRICES, SAMPLES } from "./eval";
+import {
+  cost,
+  exactMatch,
+  MODELS,
+  normalizeAnswer,
+  parseCustomCases,
+  PRICES,
+  SAMPLES,
+} from "./eval";
 
 describe("cost", () => {
   it("prices input and output tokens per million", () => {
@@ -59,5 +67,31 @@ describe("exactMatch", () => {
   it("keeps punctuation that is not trailing", () => {
     expect(normalizeAnswer("3.14")).toBe("3.14");
     expect(normalizeAnswer("e.g. this.")).toBe("e.g. this");
+  });
+});
+
+describe("parseCustomCases", () => {
+  it("parses input | expected lines", () => {
+    expect(parseCustomCases("What is 2+2? | 4\r\nCapital of France |Paris", 20)).toEqual([
+      { input: "What is 2+2?", expected: "4" },
+      { input: "Capital of France", expected: "Paris" },
+    ]);
+  });
+
+  it("splits on the first separator only", () => {
+    expect(parseCustomCases("a | b | c", 20)).toEqual([{ input: "a", expected: "b | c" }]);
+  });
+
+  it("skips blank, separator-less, and one-sided lines", () => {
+    expect(parseCustomCases("\nno separator\n | x\ny | \nok | yes\n", 20)).toEqual([
+      { input: "ok", expected: "yes" },
+    ]);
+  });
+
+  it("caps the number of cases", () => {
+    const text = Array.from({ length: 30 }, (_, i) => `q${i} | a${i}`).join("\n");
+    const cases = parseCustomCases(text, 20);
+    expect(cases).toHaveLength(20);
+    expect(cases.at(-1)).toEqual({ input: "q19", expected: "a19" });
   });
 });

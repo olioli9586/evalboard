@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useState } from "react";
 import {
   MODELS,
+  parseCustomCases,
   SAMPLES,
   type CaseResult,
   type EvalCase,
@@ -25,6 +26,17 @@ type Cell =
 
 type Grid = Record<string, Cell[]>; // model -> per-case cell
 
+// What the current results were produced from. The setup form stays editable
+// after a run, so results, case detail, and export read from this snapshot
+// rather than from the live form state.
+interface RunSnapshot {
+  dataset: string;
+  system: string;
+  grader: GraderKind;
+  cases: EvalCase[];
+  models: string[];
+}
+
 const MAX_CASES = 20;
 const CONCURRENCY = 3;
 
@@ -38,6 +50,7 @@ export default function Home() {
     "claude-sonnet-4-6",
   ]);
   const [grid, setGrid] = useState<Grid>({});
+  const [lastRun, setLastRun] = useState<RunSnapshot | null>(null);
   const [running, setRunning] = useState(false);
   const [runError, setRunError] = useState("");
   const [detail, setDetail] = useState<{ model: string; idx: number } | null>(null);
@@ -50,23 +63,15 @@ export default function Home() {
 
   const cases: EvalCase[] = useMemo(() => {
     if (datasetIdx >= 0) return SAMPLES[datasetIdx].cases;
-    return customText
-      .split("\n")
-      .map((line) => {
-        const sep = line.indexOf("|");
-        if (sep === -1) return null;
-        return {
-          input: line.slice(0, sep).trim(),
-          expected: line.slice(sep + 1).trim(),
-        };
-      })
-      .filter((c): c is EvalCase => !!c && !!c.input && !!c.expected)
-      .slice(0, MAX_CASES);
+    return parseCustomCases(customText, MAX_CASES);
   }, [datasetIdx, customText]);
 
   function pickDataset(idx: number) {
+    // Switching mid-run would wipe the grid while workers are still filling it.
+    if (running) return;
     setDatasetIdx(idx);
     setGrid({});
+    setLastRun(null);
     setDetail(null);
     if (idx >= 0) {
       setSystem(SAMPLES[idx].system);
@@ -80,11 +85,19 @@ export default function Home() {
     setRunError("");
     setDetail(null);
 
+    const snapshot: RunSnapshot = {
+      dataset: datasetIdx >= 0 ? SAMPLES[datasetIdx].name : "custom",
+      system,
+      grader,
+      cases,
+      models: [...selectedModels],
+    };
     const fresh: Grid = {};
-    for (const m of selectedModels) fresh[m] = cases.map(() => ({ status: "idle" }));
+    for (const m of snapshot.models) fresh[m] = cases.map(() => ({ status: "idle" }));
     setGrid(fresh);
+    setLastRun(snapshot);
 
-    const jobs = selectedModels.flatMap((model) =>
+    const jobs = snapshot.models.flatMap((model) =>
       cases.map((c, idx) => ({ model, idx, c })),
     );
 
@@ -105,8 +118,9 @@ export default function Home() {
               grader,
             }),
           });
-          const data = await res.json();
-          if (!res.ok) throw new Error(data.error ?? `HTTP ${res.status}`);
+          // A platform error page (e.g. a function timeout) isn't JSON.
+          const data = await res.json().catch(() => null);
+          if (!res.ok || !data) throw new Error(data?.error ?? `HTTP ${res.status}`);
           fresh[job.model][job.idx] = { status: "done", r: data };
           setGrid((g) => setCell(g, job.model, job.idx, { status: "done", r: data }));
         } catch (err) {
@@ -126,7 +140,7 @@ export default function Home() {
 
     // Record the run for history/diffing.
     const models: SavedRun["models"] = {};
-    for (const m of selectedModels) {
+    for (const m of snapshot.models) {
       const cells = fresh[m];
       const done = cells.filter((c) => c.status === "done") as Extract<Cell, { status: "done" }>[];
       models[m] = {
@@ -144,7 +158,7 @@ export default function Home() {
       saveRun({
         id: crypto.randomUUID(),
         at: new Date().toISOString(),
-        dataset: datasetIdx >= 0 ? SAMPLES[datasetIdx].name : "custom",
+        dataset: snapshot.dataset,
         grader,
         system,
         caseKey: JSON.stringify(cases.map((c) => c.input)),
@@ -155,11 +169,12 @@ export default function Home() {
   }
 
   function exportJson() {
+    if (!lastRun) return;
     const payload = {
-      dataset: datasetIdx >= 0 ? SAMPLES[datasetIdx].name : "custom",
-      system,
-      grader,
-      cases,
+      dataset: lastRun.dataset,
+      system: lastRun.system,
+      grader: lastRun.grader,
+      cases: lastRun.cases,
       results: grid,
       exported_at: new Date().toISOString(),
     };
@@ -172,7 +187,7 @@ export default function Home() {
     URL.revokeObjectURL(url);
   }
 
-  const hasResults = Object.keys(grid).length > 0;
+  const hasResults = lastRun !== null;
   const detailCell = detail ? grid[detail.model]?.[detail.idx] : null;
 
   return (
@@ -215,11 +230,16 @@ export default function Home() {
                 <Label>Dataset</Label>
                 <div className="mt-2 flex flex-wrap gap-2">
                   {SAMPLES.map((s, i) => (
-                    <Chip key={s.name} active={datasetIdx === i} onClick={() => pickDataset(i)}>
+                    <Chip
+                      key={s.name}
+                      active={datasetIdx === i}
+                      disabled={running}
+                      onClick={() => pickDataset(i)}
+                    >
                       {s.name}
                     </Chip>
                   ))}
-                  <Chip active={datasetIdx === -1} onClick={() => pickDataset(-1)}>
+                  <Chip active={datasetIdx === -1} disabled={running} onClick={() => pickDataset(-1)}>
                     Custom
                   </Chip>
                 </div>
@@ -343,7 +363,7 @@ export default function Home() {
             </div>
 
             <div className="mt-4 space-y-3">
-              {selectedModels.map((model) => {
+              {lastRun.models.map((model) => {
                 const cells = grid[model] ?? [];
                 const done = cells.filter((c) => c.status === "done") as Extract<Cell, { status: "done" }>[];
                 const passed = done.filter((c) => c.r.pass).length;
@@ -401,7 +421,7 @@ export default function Home() {
         )}
 
         {/* Case detail */}
-        {detail && detailCell && (detailCell.status === "done" || detailCell.status === "error") && (
+        {lastRun && detail && detailCell && (detailCell.status === "done" || detailCell.status === "error") && (
           <section className="mt-8 rounded-xl border border-board/30 bg-card p-5">
             <div className="flex items-baseline justify-between gap-4">
               <h3 className="font-display text-base font-semibold">
@@ -422,8 +442,8 @@ export default function Home() {
               </button>
             </div>
             <dl className="mt-4 space-y-3 text-[14px]">
-              <DetailRow label="Input" value={cases[detail.idx]?.input ?? ""} />
-              <DetailRow label="Expected" value={cases[detail.idx]?.expected ?? ""} />
+              <DetailRow label="Input" value={lastRun.cases[detail.idx]?.input ?? ""} />
+              <DetailRow label="Expected" value={lastRun.cases[detail.idx]?.expected ?? ""} />
               {detailCell.status === "done" ? (
                 <>
                   <DetailRow label="Output" value={detailCell.r.output} mono />
@@ -629,10 +649,12 @@ function Label({ children }: { children: React.ReactNode }) {
 
 function Chip({
   active,
+  disabled,
   onClick,
   children,
 }: {
   active: boolean;
+  disabled?: boolean;
   onClick: () => void;
   children: React.ReactNode;
 }) {
@@ -640,7 +662,8 @@ function Chip({
     <button
       type="button"
       onClick={onClick}
-      className={`rounded-md border px-3 py-1.5 text-[13px] font-medium transition focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-board ${
+      disabled={disabled}
+      className={`rounded-md border px-3 py-1.5 text-[13px] font-medium transition focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-board disabled:cursor-not-allowed disabled:opacity-60 ${
         active
           ? "border-board bg-board text-chalk"
           : "border-line bg-card text-ink hover:border-board/50"
