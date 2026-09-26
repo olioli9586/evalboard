@@ -38,6 +38,16 @@ export function cost(model: string, inTok: number, outTok: number): number {
   return (inTok * p.in + outTok * p.out) / 1_000_000;
 }
 
+// Exact-match grading, normalized for case, surrounding whitespace, and
+// trailing punctuation: "Billing." and "billing" are the same answer.
+export function normalizeAnswer(s: string): string {
+  return s.trim().toLowerCase().replace(/[.!?]+$/, "").trimEnd();
+}
+
+export function exactMatch(output: string, expected: string): boolean {
+  return normalizeAnswer(output) === normalizeAnswer(expected);
+}
+
 export interface SampleDataset {
   name: string;
   description: string;

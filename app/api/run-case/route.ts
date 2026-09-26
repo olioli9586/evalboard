@@ -1,6 +1,6 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { NextRequest } from "next/server";
-import { cost, MODELS, type CaseResult, type GraderKind } from "@/lib/eval";
+import { cost, exactMatch, MODELS, type CaseResult, type GraderKind } from "@/lib/eval";
 import { checkRateLimit } from "@/lib/rate-limit";
 
 export const runtime = "nodejs";
@@ -78,7 +78,7 @@ export async function POST(req: NextRequest) {
   let pass: boolean;
   let reasoning = "";
   if (grader === "exact") {
-    pass = normalize(output) === normalize(expected);
+    pass = exactMatch(output, expected);
   } else {
     let verdict: Awaited<ReturnType<typeof judge>>;
     try {
@@ -148,10 +148,6 @@ function createCompletion(
     system: system || undefined,
     messages: [{ role: "user", content: input }],
   });
-}
-
-function normalize(s: string): string {
-  return s.trim().toLowerCase().replace(/[.!]$/, "");
 }
 
 // LLM-as-judge: structured verdict via a strict JSON schema, so the grade

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { cost, MODELS, PRICES, SAMPLES } from "./eval";
+import { cost, exactMatch, MODELS, normalizeAnswer, PRICES, SAMPLES } from "./eval";
 
 describe("cost", () => {
   it("prices input and output tokens per million", () => {
@@ -32,5 +32,32 @@ describe("reference data", () => {
         expect(c.expected.trim()).not.toBe("");
       }
     }
+  });
+});
+
+describe("exactMatch", () => {
+  it("ignores case, surrounding whitespace, and a trailing period", () => {
+    expect(exactMatch("  Billing.\n", "billing")).toBe(true);
+    expect(exactMatch("BUG", "bug")).toBe(true);
+    expect(exactMatch("4", "4.")).toBe(true);
+  });
+
+  it("ignores a run of trailing punctuation", () => {
+    expect(exactMatch("billing..", "billing")).toBe(true);
+    expect(exactMatch("Account!!", "account")).toBe(true);
+    expect(exactMatch("bug?", "bug")).toBe(true);
+    expect(exactMatch("bug !", "bug")).toBe(true);
+  });
+
+  it("still distinguishes different answers", () => {
+    expect(exactMatch("bug", "billing")).toBe(false);
+    expect(exactMatch("feature request", "feature_request")).toBe(false);
+    expect(exactMatch("billing issue", "billing")).toBe(false);
+    expect(exactMatch("", "billing")).toBe(false);
+  });
+
+  it("keeps punctuation that is not trailing", () => {
+    expect(normalizeAnswer("3.14")).toBe("3.14");
+    expect(normalizeAnswer("e.g. this.")).toBe("e.g. this");
   });
 });
