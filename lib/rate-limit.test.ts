@@ -44,4 +44,17 @@ describe("checkRateLimit", () => {
     for (let i = 0; i < 60; i++) expect(check("a")).toBe(true);
     expect(check("a")).toBe(false);
   });
+
+  it("falls back to the default when the limit is not a number", async () => {
+    for (const raw of ["abc", "", "  ", "-5"]) {
+      const check = await freshLimiter(raw);
+      for (let i = 0; i < 60; i++) expect(check("a")).toBe(true);
+      expect(check("a")).toBe(false);
+    }
+  });
+
+  it("honours a limit of 0 as a full stop", async () => {
+    const check = await freshLimiter("0");
+    expect(check("a")).toBe(false);
+  });
 });
