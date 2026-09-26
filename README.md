@@ -53,9 +53,16 @@ Browser ── one POST per (model × case) ──▶ /api/run-case
 
 ```bash
 npm install
-cp .env.example .env.local   # add your ANTHROPIC_API_KEY
+echo "ANTHROPIC_API_KEY=sk-ant-..." > .env.local
 npm run dev
 ```
+
+Optional settings in `.env.local`: `EVALBOARD_JUDGE_MODEL` (default
+`claude-opus-4-8`) and `DEMO_DAILY_CASE_LIMIT` (cases per IP per day,
+default 60).
+
+`npm test` runs the unit tests (Vitest). The Anthropic client is stubbed, so
+no API key is needed and no calls are billed.
 
 ## Tech
 
