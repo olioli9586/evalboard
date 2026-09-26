@@ -83,4 +83,28 @@ describe("run storage", () => {
     localStorage.setItem("evalboard-runs", "{not json");
     expect(loadRuns()).toEqual([]);
   });
+
+  it("ignores valid JSON that is not a list of runs", () => {
+    for (const raw of ["null", "{}", '"x"', "42"]) {
+      localStorage.setItem("evalboard-runs", raw);
+      expect(loadRuns()).toEqual([]);
+      expect(saveRun(run("a")).map((r) => r.id)).toEqual(["a"]);
+    }
+  });
+
+  it("drops malformed entries but keeps good ones", () => {
+    localStorage.setItem("evalboard-runs", JSON.stringify([null, { id: 1 }, run("ok")]));
+    expect(loadRuns().map((r) => r.id)).toEqual(["ok"]);
+  });
+
+  it("still returns the updated list when storage is full", () => {
+    saveRun(run("a"));
+    const quota = vi.spyOn(localStorage, "setItem").mockImplementation(() => {
+      throw new Error("QuotaExceededError");
+    });
+    expect(saveRun(run("b")).map((r) => r.id)).toEqual(["b", "a"]);
+    expect(deleteRun("a").map((r) => r.id)).toEqual([]);
+    quota.mockRestore();
+  });
 });
+
