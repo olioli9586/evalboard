@@ -42,9 +42,11 @@ describe("POST /api/run-case", () => {
   beforeEach(() => {
     vi.stubEnv("ANTHROPIC_API_KEY", "test-key");
     create.mockReset();
+    vi.spyOn(console, "error").mockImplementation(() => {});
   });
   afterEach(() => {
     vi.unstubAllEnvs();
+    vi.restoreAllMocks();
   });
 
   it("returns 500 when no API key is configured", async () => {
@@ -181,6 +183,55 @@ describe("POST /api/run-case", () => {
     expect(body.model_used).toBe("claude-opus-4-8");
     expect(body.pass).toBe(true);
     expect(create.mock.calls[1][0].model).toBe("claude-opus-4-8");
+  });
+
+  it("returns a JSON 502 when the model call fails", async () => {
+    const { APIError } = await import("@anthropic-ai/sdk");
+    const body = { type: "error", error: { type: "overloaded_error", message: "Overloaded" } };
+    create.mockRejectedValueOnce(new APIError(529, body, undefined, new Headers()));
+    const POST = await loadRoute();
+    const res = await POST(request(base));
+    expect(res.status).toBe(502);
+    expect((await res.json()).error).toMatch(/Model call failed: 529 .*Overloaded/);
+  });
+
+  it("returns a JSON 502 when the fallback model also fails", async () => {
+    const { NotFoundError } = await import("@anthropic-ai/sdk");
+    create
+      .mockRejectedValueOnce(new NotFoundError(404, {}, "model not found", new Headers()))
+      .mockRejectedValueOnce(new Error("socket hang up"));
+    const POST = await loadRoute();
+    const res = await POST(request(base));
+    expect(res.status).toBe(502);
+    expect((await res.json()).error).toMatch(/socket hang up/);
+  });
+
+  it("does not retry a 404 from the fallback model itself", async () => {
+    const { NotFoundError } = await import("@anthropic-ai/sdk");
+    create.mockRejectedValueOnce(new NotFoundError(404, {}, "gone", new Headers()));
+    const POST = await loadRoute();
+    const res = await POST(request({ ...base, model: "claude-opus-4-8" }));
+    expect(res.status).toBe(502);
+    expect(create).toHaveBeenCalledTimes(1);
+  });
+
+  it("returns a JSON 502 when the judge's verdict is unreadable", async () => {
+    create
+      .mockResolvedValueOnce(message("Renew the contract."))
+      .mockResolvedValueOnce(message('{"reasoning": "cut of', undefined, "max_tokens"));
+    const POST = await loadRoute();
+    const res = await POST(request({ ...base, grader: "judge" }));
+    expect(res.status).toBe(502);
+    expect((await res.json()).error).toMatch(/Grading failed: .*unreadable verdict.*max_tokens/);
+  });
+
+  it("returns a JSON 502 when the judge's verdict has no pass value", async () => {
+    create
+      .mockResolvedValueOnce(message("Renew the contract."))
+      .mockResolvedValueOnce(message(JSON.stringify({ reasoning: "hmm" })));
+    const POST = await loadRoute();
+    const res = await POST(request({ ...base, grader: "judge" }));
+    expect(res.status).toBe(502);
   });
 
   it("returns 422 when the model refuses", async () => {

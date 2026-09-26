@@ -43,18 +43,21 @@ export async function POST(req: NextRequest) {
   const client = new Anthropic();
 
   // --- 1. Run the case on the target model (fallback to Opus 4.8 on 404) ---
+  // Upstream failures become JSON errors so the client can show them on the
+  // cell instead of choking on an empty 500 body.
   let modelUsed = model;
   const started = Date.now();
   let response: Anthropic.Message;
   try {
-    response = await createCompletion(client, model, system, input);
-  } catch (err) {
-    if (err instanceof Anthropic.NotFoundError && model !== FALLBACK_MODEL) {
+    try {
+      response = await createCompletion(client, model, system, input);
+    } catch (err) {
+      if (!(err instanceof Anthropic.NotFoundError) || model === FALLBACK_MODEL) throw err;
       modelUsed = FALLBACK_MODEL;
       response = await createCompletion(client, FALLBACK_MODEL, system, input);
-    } else {
-      throw err;
     }
+  } catch (err) {
+    return upstreamError("Model call failed", err);
   }
   const latency_ms = Date.now() - started;
 
@@ -77,7 +80,12 @@ export async function POST(req: NextRequest) {
   if (grader === "exact") {
     pass = normalize(output) === normalize(expected);
   } else {
-    const verdict = await judge(client, { system, input, expected, output });
+    let verdict: Awaited<ReturnType<typeof judge>>;
+    try {
+      verdict = await judge(client, { system, input, expected, output });
+    } catch (err) {
+      return upstreamError("Grading failed", err);
+    }
     pass = verdict.pass;
     reasoning = verdict.reasoning;
     cost_usd += verdict.cost_usd;
@@ -120,6 +128,12 @@ function parseRequest(body: unknown): RunCaseRequest | { error: string } {
     return { error: "Input/expected/system missing or too long." };
   }
   return { model, system, input, expected, grader };
+}
+
+function upstreamError(what: string, err: unknown): Response {
+  console.error(`[run-case] ${what}:`, err);
+  const detail = err instanceof Error ? err.message : String(err);
+  return Response.json({ error: `${what}: ${detail}` }, { status: 502 });
 }
 
 function createCompletion(
@@ -178,7 +192,16 @@ async function judge(
     .filter((b): b is Anthropic.TextBlock => b.type === "text")
     .map((b) => b.text)
     .join("");
-  const verdict = JSON.parse(text) as { pass: boolean; reasoning: string };
+  // A refusal or max_tokens stop can leave the verdict empty or truncated.
+  let verdict: { pass: boolean; reasoning: string };
+  try {
+    verdict = JSON.parse(text);
+  } catch {
+    throw new Error(`The judge returned an unreadable verdict (stop reason: ${response.stop_reason}).`);
+  }
+  if (typeof verdict?.pass !== "boolean") {
+    throw new Error("The judge's verdict had no pass/fail value.");
+  }
   return {
     pass: verdict.pass,
     reasoning: verdict.reasoning,
