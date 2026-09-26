@@ -7,6 +7,7 @@ export const runtime = "nodejs";
 export const maxDuration = 120;
 
 const FALLBACK_MODEL = "claude-opus-4-8";
+const MAX_FIELD_LENGTH = 4000;
 const JUDGE_MODEL = process.env.EVALBOARD_JUDGE_MODEL ?? "claude-opus-4-8";
 
 interface RunCaseRequest {
@@ -27,19 +28,17 @@ export async function POST(req: NextRequest) {
     return Response.json({ error: "Daily demo budget reached for your IP." }, { status: 429 });
   }
 
-  let body: RunCaseRequest;
+  let body: unknown;
   try {
     body = await req.json();
   } catch {
     return Response.json({ error: "Invalid JSON body." }, { status: 400 });
   }
-  const { model, system, input, expected, grader } = body;
-  if (!MODELS.includes(model)) {
-    return Response.json({ error: `Unknown model: ${model}` }, { status: 400 });
+  const parsed = parseRequest(body);
+  if ("error" in parsed) {
+    return Response.json({ error: parsed.error }, { status: 400 });
   }
-  if (!input || input.length > 4000 || (system?.length ?? 0) > 4000) {
-    return Response.json({ error: "Input/system missing or too long." }, { status: 400 });
-  }
+  const { model, system, input, expected, grader } = parsed;
 
   const client = new Anthropic();
 
@@ -95,6 +94,32 @@ export async function POST(req: NextRequest) {
     model_used: modelUsed,
   };
   return Response.json(result);
+}
+
+// Validate the untrusted body field by field: a wrong type would otherwise
+// slip past the length checks, and an unknown grader would silently fall
+// through to the (paid) judge.
+function parseRequest(body: unknown): RunCaseRequest | { error: string } {
+  if (typeof body !== "object" || body === null) return { error: "Invalid JSON body." };
+  const { model, system = "", input, expected, grader } = body as Record<string, unknown>;
+  if (typeof model !== "string" || !MODELS.includes(model)) {
+    return { error: `Unknown model: ${String(model)}` };
+  }
+  if (grader !== "exact" && grader !== "judge") {
+    return { error: 'grader must be "exact" or "judge".' };
+  }
+  if (
+    typeof input !== "string" ||
+    typeof expected !== "string" ||
+    typeof system !== "string" ||
+    !input ||
+    input.length > MAX_FIELD_LENGTH ||
+    expected.length > MAX_FIELD_LENGTH ||
+    system.length > MAX_FIELD_LENGTH
+  ) {
+    return { error: "Input/expected/system missing or too long." };
+  }
+  return { model, system, input, expected, grader };
 }
 
 function createCompletion(

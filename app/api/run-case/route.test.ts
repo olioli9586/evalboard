@@ -72,6 +72,55 @@ describe("POST /api/run-case", () => {
     expect(create).not.toHaveBeenCalled();
   });
 
+  it("rejects a JSON body that is not an object", async () => {
+    const POST = await loadRoute();
+    for (const body of ["null", "42", '"hi"']) {
+      const res = await POST(request(body));
+      expect(res.status).toBe(400);
+    }
+    expect(create).not.toHaveBeenCalled();
+  });
+
+  it("rejects fields of the wrong type instead of calling the model", async () => {
+    const POST = await loadRoute();
+    const bad = [
+      { ...base, input: 12345 },
+      { ...base, input: ["x"] },
+      { ...base, expected: undefined },
+      { ...base, expected: { a: 1 } },
+      { ...base, system: 7 },
+      { ...base, model: ["claude-haiku-4-5"] },
+    ];
+    for (const body of bad) {
+      expect((await POST(request(body))).status).toBe(400);
+    }
+    expect(create).not.toHaveBeenCalled();
+  });
+
+  it("caps the expected answer length", async () => {
+    const POST = await loadRoute();
+    expect((await POST(request({ ...base, expected: "x".repeat(4001) }))).status).toBe(400);
+    expect(create).not.toHaveBeenCalled();
+  });
+
+  it("rejects an unknown grader rather than defaulting to the paid judge", async () => {
+    const POST = await loadRoute();
+    for (const grader of [undefined, "fuzzy", "EXACT"]) {
+      expect((await POST(request({ ...base, grader }))).status).toBe(400);
+    }
+    expect(create).not.toHaveBeenCalled();
+  });
+
+  it("treats a missing system prompt as empty", async () => {
+    create.mockResolvedValueOnce(message("billing"));
+    const POST = await loadRoute();
+    const { system: _omit, ...noSystem } = base;
+    void _omit;
+    const res = await POST(request(noSystem));
+    expect(res.status).toBe(200);
+    expect(create.mock.calls[0][0].system).toBeUndefined();
+  });
+
   it("grades exact match with normalization and reports telemetry", async () => {
     create.mockResolvedValueOnce(message("  Billing. ", { input_tokens: 1000, output_tokens: 200 }));
     const POST = await loadRoute();
