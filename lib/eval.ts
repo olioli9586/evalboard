@@ -38,6 +38,34 @@ export function cost(model: string, inTok: number, outTok: number): number {
   return (inTok * p.in + outTok * p.out) / 1_000_000;
 }
 
+// Exact-match grading, normalized for case, surrounding whitespace, and
+// trailing punctuation: "Billing." and "billing" are the same answer.
+export function normalizeAnswer(s: string): string {
+  return s.trim().toLowerCase().replace(/[.!?]+$/, "").trimEnd();
+}
+
+export function exactMatch(output: string, expected: string): boolean {
+  return normalizeAnswer(output) === normalizeAnswer(expected);
+}
+
+// Custom datasets are pasted as one `input | expected` line per case. Only the
+// first "|" splits, so the expected answer may itself contain "|". Lines
+// without a separator or with an empty side are skipped.
+export function parseCustomCases(text: string, max: number): EvalCase[] {
+  return text
+    .split("\n")
+    .map((line) => {
+      const sep = line.indexOf("|");
+      if (sep === -1) return null;
+      return {
+        input: line.slice(0, sep).trim(),
+        expected: line.slice(sep + 1).trim(),
+      };
+    })
+    .filter((c): c is EvalCase => !!c && !!c.input && !!c.expected)
+    .slice(0, max);
+}
+
 export interface SampleDataset {
   name: string;
   description: string;

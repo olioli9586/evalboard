@@ -29,22 +29,39 @@ const MAX_RUNS = 20;
 export function loadRuns(): SavedRun[] {
   if (typeof window === "undefined") return [];
   try {
-    return JSON.parse(localStorage.getItem(KEY) ?? "[]") as SavedRun[];
+    const parsed: unknown = JSON.parse(localStorage.getItem(KEY) ?? "[]");
+    // Valid JSON of the wrong shape (e.g. "null") would otherwise crash the page.
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter(
+      (r): r is SavedRun =>
+        typeof r === "object" &&
+        r !== null &&
+        typeof r.id === "string" &&
+        typeof r.models === "object" &&
+        r.models !== null,
+    );
   } catch {
     return [];
   }
 }
 
-export function saveRun(run: SavedRun): SavedRun[] {
-  const runs = [run, ...loadRuns()].slice(0, MAX_RUNS);
-  localStorage.setItem(KEY, JSON.stringify(runs));
+// Storage can be full or unavailable (private browsing); history is a
+// convenience, so keep going with the in-memory list rather than throw.
+function persist(runs: SavedRun[]): SavedRun[] {
+  try {
+    localStorage.setItem(KEY, JSON.stringify(runs));
+  } catch {
+    // ignore
+  }
   return runs;
 }
 
+export function saveRun(run: SavedRun): SavedRun[] {
+  return persist([run, ...loadRuns()].slice(0, MAX_RUNS));
+}
+
 export function deleteRun(id: string): SavedRun[] {
-  const runs = loadRuns().filter((r) => r.id !== id);
-  localStorage.setItem(KEY, JSON.stringify(runs));
-  return runs;
+  return persist(loadRuns().filter((r) => r.id !== id));
 }
 
 export type Transition = "pass-pass" | "fail-fail" | "fixed" | "regressed" | "ungraded";

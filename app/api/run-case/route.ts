@@ -1,12 +1,13 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { NextRequest } from "next/server";
-import { cost, MODELS, type CaseResult, type GraderKind } from "@/lib/eval";
+import { cost, exactMatch, MODELS, type CaseResult, type GraderKind } from "@/lib/eval";
 import { checkRateLimit } from "@/lib/rate-limit";
 
 export const runtime = "nodejs";
 export const maxDuration = 120;
 
 const FALLBACK_MODEL = "claude-opus-4-8";
+const MAX_FIELD_LENGTH = 4000;
 const JUDGE_MODEL = process.env.EVALBOARD_JUDGE_MODEL ?? "claude-opus-4-8";
 
 interface RunCaseRequest {
@@ -27,35 +28,36 @@ export async function POST(req: NextRequest) {
     return Response.json({ error: "Daily demo budget reached for your IP." }, { status: 429 });
   }
 
-  let body: RunCaseRequest;
+  let body: unknown;
   try {
     body = await req.json();
   } catch {
     return Response.json({ error: "Invalid JSON body." }, { status: 400 });
   }
-  const { model, system, input, expected, grader } = body;
-  if (!MODELS.includes(model)) {
-    return Response.json({ error: `Unknown model: ${model}` }, { status: 400 });
+  const parsed = parseRequest(body);
+  if ("error" in parsed) {
+    return Response.json({ error: parsed.error }, { status: 400 });
   }
-  if (!input || input.length > 4000 || (system?.length ?? 0) > 4000) {
-    return Response.json({ error: "Input/system missing or too long." }, { status: 400 });
-  }
+  const { model, system, input, expected, grader } = parsed;
 
   const client = new Anthropic();
 
   // --- 1. Run the case on the target model (fallback to Opus 4.8 on 404) ---
+  // Upstream failures become JSON errors so the client can show them on the
+  // cell instead of choking on an empty 500 body.
   let modelUsed = model;
   const started = Date.now();
   let response: Anthropic.Message;
   try {
-    response = await createCompletion(client, model, system, input);
-  } catch (err) {
-    if (err instanceof Anthropic.NotFoundError && model !== FALLBACK_MODEL) {
+    try {
+      response = await createCompletion(client, model, system, input);
+    } catch (err) {
+      if (!(err instanceof Anthropic.NotFoundError) || model === FALLBACK_MODEL) throw err;
       modelUsed = FALLBACK_MODEL;
       response = await createCompletion(client, FALLBACK_MODEL, system, input);
-    } else {
-      throw err;
     }
+  } catch (err) {
+    return upstreamError("Model call failed", err);
   }
   const latency_ms = Date.now() - started;
 
@@ -76,9 +78,14 @@ export async function POST(req: NextRequest) {
   let pass: boolean;
   let reasoning = "";
   if (grader === "exact") {
-    pass = normalize(output) === normalize(expected);
+    pass = exactMatch(output, expected);
   } else {
-    const verdict = await judge(client, { system, input, expected, output });
+    let verdict: Awaited<ReturnType<typeof judge>>;
+    try {
+      verdict = await judge(client, { system, input, expected, output });
+    } catch (err) {
+      return upstreamError("Grading failed", err);
+    }
     pass = verdict.pass;
     reasoning = verdict.reasoning;
     cost_usd += verdict.cost_usd;
@@ -97,6 +104,38 @@ export async function POST(req: NextRequest) {
   return Response.json(result);
 }
 
+// Validate the untrusted body field by field: a wrong type would otherwise
+// slip past the length checks, and an unknown grader would silently fall
+// through to the (paid) judge.
+function parseRequest(body: unknown): RunCaseRequest | { error: string } {
+  if (typeof body !== "object" || body === null) return { error: "Invalid JSON body." };
+  const { model, system = "", input, expected, grader } = body as Record<string, unknown>;
+  if (typeof model !== "string" || !MODELS.includes(model)) {
+    return { error: `Unknown model: ${String(model)}` };
+  }
+  if (grader !== "exact" && grader !== "judge") {
+    return { error: 'grader must be "exact" or "judge".' };
+  }
+  if (
+    typeof input !== "string" ||
+    typeof expected !== "string" ||
+    typeof system !== "string" ||
+    !input ||
+    input.length > MAX_FIELD_LENGTH ||
+    expected.length > MAX_FIELD_LENGTH ||
+    system.length > MAX_FIELD_LENGTH
+  ) {
+    return { error: "Input/expected/system missing or too long." };
+  }
+  return { model, system, input, expected, grader };
+}
+
+function upstreamError(what: string, err: unknown): Response {
+  console.error(`[run-case] ${what}:`, err);
+  const detail = err instanceof Error ? err.message : String(err);
+  return Response.json({ error: `${what}: ${detail}` }, { status: 502 });
+}
+
 function createCompletion(
   client: Anthropic,
   model: string,
@@ -109,10 +148,6 @@ function createCompletion(
     system: system || undefined,
     messages: [{ role: "user", content: input }],
   });
-}
-
-function normalize(s: string): string {
-  return s.trim().toLowerCase().replace(/[.!]$/, "");
 }
 
 // LLM-as-judge: structured verdict via a strict JSON schema, so the grade
@@ -153,7 +188,16 @@ async function judge(
     .filter((b): b is Anthropic.TextBlock => b.type === "text")
     .map((b) => b.text)
     .join("");
-  const verdict = JSON.parse(text) as { pass: boolean; reasoning: string };
+  // A refusal or max_tokens stop can leave the verdict empty or truncated.
+  let verdict: { pass: boolean; reasoning: string };
+  try {
+    verdict = JSON.parse(text);
+  } catch {
+    throw new Error(`The judge returned an unreadable verdict (stop reason: ${response.stop_reason}).`);
+  }
+  if (typeof verdict?.pass !== "boolean") {
+    throw new Error("The judge's verdict had no pass/fail value.");
+  }
   return {
     pass: verdict.pass,
     reasoning: verdict.reasoning,
