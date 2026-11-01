@@ -64,6 +64,26 @@ default 60).
 `npm test` runs the unit tests (Vitest). The Anthropic client is stubbed, so
 no API key is needed and no calls are billed.
 
+### Database (v2, in progress)
+
+Schema lives in `db/migrations/*.sql` (plain SQL, applied in order, each in a
+transaction, checksummed in `schema_migrations`). `npm run db:migrate` applies
+pending migrations to `DATABASE_URL`.
+
+### Tests
+
+`npm run test:db` runs the Postgres integration tests against
+`TEST_DATABASE_URL`. They wipe that database's `public` schema, so the database
+name must contain `test`:
+
+```bash
+docker run -d --name evalboard-pg -e POSTGRES_PASSWORD=postgres \
+  -e POSTGRES_DB=evalboard_test -p 54329:5432 postgres:17
+TEST_DATABASE_URL=postgres://postgres:postgres@localhost:54329/evalboard_test npm run test:db
+```
+
+CI runs both suites; the DB job uses a Postgres 17 service container.
+
 ## Tech
 
 Next.js 16 (App Router) · TypeScript · Tailwind CSS · Anthropic SDK · Vercel
