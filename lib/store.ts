@@ -1,0 +1,248 @@
+import { createHash } from "node:crypto";
+import type { Db } from "./db";
+import type { CaseResult, EvalCase, GraderKind } from "./eval";
+
+// ---------------------------------------------------------------------------
+// Data access for datasets, runs, and results. Every function takes the Db to
+// run on, so callers choose between the pool and a transaction client, and
+// tests can point it at a throwaway database.
+// ---------------------------------------------------------------------------
+
+export type DatasetSource = "sample" | "custom" | "csv" | "import";
+export type RunStatus = "queued" | "running" | "succeeded" | "failed";
+
+export interface Run {
+  id: string;
+  datasetId: string;
+  groupId: string;
+  model: string;
+  systemPrompt: string;
+  promptLabel: string | null;
+  grader: GraderKind;
+  status: RunStatus;
+  totalCases: number;
+  error: string | null;
+  createdAt: Date;
+  startedAt: Date | null;
+  finishedAt: Date | null;
+}
+
+export interface StoredCase extends EvalCase {
+  id: string;
+  position: number;
+}
+
+export interface RunSummary {
+  done: number; // cases with a result row, graded or errored
+  graded: number;
+  passed: number;
+  errored: number;
+  avgLatencyMs: number; // over graded cases
+  costUsd: number;
+}
+
+const RUN_COLUMNS = `
+  id, dataset_id as "datasetId", group_id as "groupId", model,
+  system_prompt as "systemPrompt", prompt_label as "promptLabel", grader, status,
+  total_cases as "totalCases", error, created_at as "createdAt",
+  started_at as "startedAt", finished_at as "finishedAt"`;
+
+export function hashCases(cases: EvalCase[]): string {
+  return createHash("sha256")
+    .update(JSON.stringify(cases.map((c) => [c.input, c.expected])))
+    .digest("hex");
+}
+
+// Returns the existing dataset when the same cases were stored before. Run it
+// inside a transaction so a dataset never exists without its cases.
+export async function upsertDataset(
+  db: Db,
+  args: { name: string; source: DatasetSource; cases: EvalCase[] },
+): Promise<{ id: string; created: boolean }> {
+  if (args.cases.length === 0) throw new Error("A dataset needs at least one case.");
+  const hash = hashCases(args.cases);
+  // Two requests storing the same cases at once: the second insert waits on
+  // the unique index, then does nothing and falls through to the select.
+  const inserted = await db.query<{ id: string }>(
+    `insert into datasets (name, source, content_hash, case_count)
+     values ($1, $2, $3, $4)
+     on conflict (content_hash) do nothing
+     returning id`,
+    [args.name, args.source, hash, args.cases.length],
+  );
+  if (inserted.rows.length === 0) {
+    const existing = await db.query<{ id: string }>(
+      "select id from datasets where content_hash = $1",
+      [hash],
+    );
+    return { id: existing.rows[0].id, created: false };
+  }
+  const id = inserted.rows[0].id;
+  // One multi-row insert via unnest instead of a round trip per case.
+  await db.query(
+    `insert into cases (dataset_id, position, input, expected)
+     select $1, t.position, t.input, t.expected
+     from unnest($2::int[], $3::text[], $4::text[]) as t(position, input, expected)`,
+    [id, args.cases.map((_, i) => i), args.cases.map((c) => c.input), args.cases.map((c) => c.expected)],
+  );
+  return { id, created: true };
+}
+
+export async function createRuns(
+  db: Db,
+  args: {
+    datasetId: string;
+    groupId: string;
+    grader: GraderKind;
+    totalCases: number;
+    variants: { model: string; systemPrompt: string; promptLabel?: string }[];
+  },
+): Promise<Run[]> {
+  const { rows } = await db.query<Run>(
+    `insert into runs (dataset_id, group_id, grader, total_cases, model, system_prompt, prompt_label)
+     select $1, $2, $3, $4, v.model, v.system_prompt, v.prompt_label
+     from unnest($5::text[], $6::text[], $7::text[])
+       with ordinality as v(model, system_prompt, prompt_label, n)
+     order by v.n
+     returning ${RUN_COLUMNS}`,
+    [
+      args.datasetId,
+      args.groupId,
+      args.grader,
+      args.totalCases,
+      args.variants.map((v) => v.model),
+      args.variants.map((v) => v.systemPrompt),
+      args.variants.map((v) => v.promptLabel ?? null),
+    ],
+  );
+  return rows;
+}
+
+export async function getRun(db: Db, id: string): Promise<Run | null> {
+  const { rows } = await db.query<Run>(`select ${RUN_COLUMNS} from runs where id = $1`, [id]);
+  return rows[0] ?? null;
+}
+
+export async function listRuns(db: Db, limit = 50): Promise<Run[]> {
+  const { rows } = await db.query<Run>(
+    `select ${RUN_COLUMNS} from runs order by created_at desc limit $1`,
+    [limit],
+  );
+  return rows;
+}
+
+// Moves a queued run to running. started_at keeps the first start, so a
+// redelivered batch doesn't reset it. Returns null for a finished run.
+export async function markRunning(db: Db, id: string): Promise<Run | null> {
+  const { rows } = await db.query<Run>(
+    `update runs set status = 'running', started_at = coalesce(started_at, now())
+     where id = $1 and status in ('queued', 'running')
+     returning ${RUN_COLUMNS}`,
+    [id],
+  );
+  return rows[0] ?? null;
+}
+
+// Only an unfinished run can finish, so a late duplicate batch can't flip a
+// failed run to succeeded or move finished_at. Returns null if already done.
+export async function finishRun(
+  db: Db,
+  id: string,
+  status: "succeeded" | "failed",
+  error: string | null = null,
+): Promise<Run | null> {
+  const { rows } = await db.query<Run>(
+    `update runs set status = $2, error = $3, finished_at = now()
+     where id = $1 and status in ('queued', 'running')
+     returning ${RUN_COLUMNS}`,
+    [id, status, error],
+  );
+  return rows[0] ?? null;
+}
+
+// The next cases of a run that have no result yet, in dataset order. The
+// worker asks "what's missing" instead of keeping an offset, which is what
+// lets it resume correctly after a crash at any point.
+export async function pendingCases(db: Db, runId: string, limit: number): Promise<StoredCase[]> {
+  const { rows } = await db.query<StoredCase>(
+    `select c.id, c.position, c.input, c.expected
+     from runs r
+     join cases c on c.dataset_id = r.dataset_id
+     left join results res on res.run_id = r.id and res.case_id = c.id
+     where r.id = $1 and res.case_id is null
+     order by c.position
+     limit $2`,
+    [runId, limit],
+  );
+  return rows;
+}
+
+// Idempotent: the first result written for a (run, case) wins and later
+// writes for the same pair are ignored. Returns whether this call wrote it.
+export async function insertResult(
+  db: Db,
+  runId: string,
+  caseId: string,
+  result: CaseResult | { error: string },
+  attempts = 1,
+): Promise<boolean> {
+  const r = "error" in result ? null : result;
+  const { rowCount } = await db.query(
+    `insert into results (run_id, case_id, output, pass, error, latency_ms, input_tokens,
+       output_tokens, cost_usd, judge_reasoning, model_used, attempts)
+     values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+     on conflict (run_id, case_id) do nothing`,
+    [
+      runId,
+      caseId,
+      r?.output ?? "",
+      r?.pass ?? null,
+      "error" in result ? result.error : null,
+      r?.latency_ms ?? null,
+      r?.input_tokens ?? 0,
+      r?.output_tokens ?? 0,
+      r?.cost_usd ?? 0,
+      r?.reasoning ?? "",
+      r?.model_used ?? null,
+      attempts,
+    ],
+  );
+  return rowCount === 1;
+}
+
+export async function runSummary(db: Db, runId: string): Promise<RunSummary> {
+  const { rows } = await db.query<RunSummary>(
+    `select
+       count(*)::int as done,
+       count(pass)::int as graded,
+       count(*) filter (where pass)::int as passed,
+       count(*) filter (where pass is null)::int as errored,
+       coalesce(round(avg(latency_ms) filter (where pass is not null)), 0)::int as "avgLatencyMs",
+       coalesce(sum(cost_usd), 0)::float8 as "costUsd"
+     from results where run_id = $1`,
+    [runId],
+  );
+  return rows[0];
+}
+
+// Reserves n cases of today's per-IP budget, all or nothing. The conditional
+// upsert is a single statement, so concurrent requests can't both slip under
+// the limit the way a read-then-write would.
+export async function reserveCases(db: Db, ip: string, n: number, limit: number): Promise<boolean> {
+  if (n > limit) return false;
+  const { rowCount } = await db.query(
+    `insert into usage_daily (ip, day, cases) values ($1, current_date, $2)
+     on conflict (ip, day) do update set cases = usage_daily.cases + excluded.cases
+     where usage_daily.cases + excluded.cases <= $3`,
+    [ip, n, limit],
+  );
+  return rowCount === 1;
+}
+
+// Total model + judge spend recorded today, for the global daily cap.
+export async function spentTodayUsd(db: Db): Promise<number> {
+  const { rows } = await db.query<{ usd: number }>(
+    "select coalesce(sum(cost_usd), 0)::float8 as usd from results where created_at >= current_date",
+  );
+  return rows[0].usd;
+}
