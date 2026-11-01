@@ -7,17 +7,22 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
-    "test": "vitest run"
+    "test": "vitest run",
+    "test:db": "vitest run --config vitest.db.config.mts",
+    "db:migrate": "node --env-file-if-exists=.env.local scripts/migrate.mts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.110.0",
+    "@vercel/functions": "^3.10.5",
     "next": "16.2.10",
+    "pg": "^8.23.1",
     "react": "19.2.4",
     "react-dom": "19.2.4"
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4",
     "@types/node": "^20",
+    "@types/pg": "^8.23.1",
     "@types/react": "^19",
     "@types/react-dom": "^19",
     "eslint": "^9",
