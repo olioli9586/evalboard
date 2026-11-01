@@ -47,6 +47,14 @@ const RUN_COLUMNS = `
   total_cases as "totalCases", error, created_at as "createdAt",
   started_at as "startedAt", finished_at as "finishedAt"`;
 
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+// Postgres rejects a malformed uuid with an error, so ids from a URL or a
+// queue message are checked before they reach a query.
+export function isUuid(s: unknown): s is string {
+  return typeof s === "string" && UUID.test(s);
+}
+
 export function hashCases(cases: EvalCase[]): string {
   return createHash("sha256")
     .update(JSON.stringify(cases.map((c) => [c.input, c.expected])))
@@ -158,6 +166,12 @@ export async function finishRun(
     [id, status, error],
   );
   return rows[0] ?? null;
+}
+
+// Keeps the latest transient error on a running run, so its page can say why
+// it is waiting and a give-up message can quote it. finishRun overwrites it.
+export async function noteRunError(db: Db, id: string, error: string): Promise<void> {
+  await db.query("update runs set error = $2 where id = $1 and status = 'running'", [id, error]);
 }
 
 // The next cases of a run that have no result yet, in dataset order. The
