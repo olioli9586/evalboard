@@ -8,8 +8,8 @@ with what was done, what was decided and why, and the next step.
 | Day | Work | Status |
 |---|---|---|
 | 1 | Schema, migrations, data-access layer, Postgres tests in CI | done |
-| 2 | `POST /api/runs`, queue worker (Vercel Queues), retry with backoff, spend caps, kill/resume test | next |
-| 3 | UI on server runs, `/runs/[id]`, `/diff`, one-time localStorage import | |
+| 2 | `POST /api/runs`, queue worker (Vercel Queues), retry with backoff, spend caps, kill/resume test | done |
+| 3 | UI on server runs, `/runs/[id]`, `/diff`, one-time localStorage import | next |
 | 4 | Neon + Queues setup, preview deploy, 250-case Banking77 run, fault-injection resume, record numbers | |
 | 5 | Prompt A/B, CSV upload | |
 | 6 | Hand-label 50 cases, judge kappa, README, RESULTS.md, fresh-context review, PR | |
@@ -75,3 +75,90 @@ enqueue the next batch or finish), per-call retry with exponential backoff and
 jitter on 429/5xx honoring `retry-after`, a global daily USD cap plus an admin
 token for big runs, and an integration test that crashes a batch halfway,
 redelivers it, and checks for no duplicates and the same score.
+
+## Day 2 (2026-11-01)
+
+**Done**
+- `lib/run-case.ts`: the model call + grading moved out of the v1 route so the
+  route and the worker grade the same way. The v1 route's 19 tests pass
+  unchanged, which shows the move didn't change its behavior.
+- `lib/retry.ts`: per-call retry (exponential backoff, full jitter,
+  `retry-after`, attempts counted).
+- `lib/worker.ts`: `processBatch` (one queue delivery = one batch) and
+  `queueRetry` (the queue's delay between redeliveries).
+- `lib/queue.ts`: `enqueueBatch`, the one function that touches
+  `@vercel/queue`. `vercel.json` registers the consumer route
+  `app/api/queues/eval-batch`.
+- `POST /api/runs` (budget + dataset + runs in one transaction, then enqueue),
+  `GET /api/runs/[id]` (status and score).
+- `lib/limits.ts`: daily USD cap, per-IP case limit, admin token.
+- Tests: 81 unit (was 49) and 40 Postgres (was 15). The kill/resume test
+  crashes batch 2 after 2 of its 5 cases are written, redelivers it, and checks
+  12 rows for 12 cases, the same score and cost as a clean run, and that the 7
+  cases written before the crash were not run again.
+- Self-review fixes before committing: the new routes answer database errors
+  with JSON (the UI shows `error`), and the worker acknowledges a malformed
+  message instead of failing on it for 24 hours of redeliveries.
+- Mutation check: three bugs planted in the worker (record rate-limited cases as
+  errored, reuse the same `seq` for the next batch, enqueue the next batch even
+  when cases failed) each made tests fail.
+
+**Decisions and why**
+- **Two retry layers.** Each API call retries up to 4 times within the
+  delivery (seconds). If that isn't enough, the batch throws and the queue
+  redelivers it later (15 s doubling to 5 min, about 23 min in total). Short
+  blips cost a few seconds; a real outage doesn't burn function time sleeping.
+  Interview line: "retry fast in-process, retry slow through the queue".
+- **Own retry instead of the SDK's built-in one** (`maxRetries: 0` on the
+  worker's client). The SDK already backs off and reads `retry-after`, but (1)
+  its retries are invisible, and the result row stores the attempt count; (2)
+  it would sleep through a long `retry-after`, while ours gives the batch back
+  to the queue when the wait is over 20 s; (3) full jitter instead of the SDK's
+  25 %, so many workers hitting the same limit don't retry in lockstep.
+- **Which failures get retried.** 408/409/429/5xx and dropped connections are
+  retried (same list as the SDK, and `x-should-retry` wins). A 400, a refusal
+  or an unreadable judge verdict would fail the same way again, so it is
+  stored as an errored case (`pass` null) and the run continues.
+- **The judge call retries on its own.** A judge 429 doesn't re-run the model
+  call that was already paid for (tested).
+- **Latency is the successful call only.** Counting backoff waits would make a
+  rate-limited model look slow.
+- **Next batch is enqueued last.** If a delivery dies after writing some
+  results, the queue redelivers it and `pendingCases` returns only what is
+  missing. Enqueuing earlier would let the run move on with holes (mutation M3
+  shows the test catches that).
+- **Idempotency key `runId:seq` on every send.** If one batch is delivered
+  twice, both copies send `seq + 1`; Vercel Queues accepts both sends but
+  delivers one, so a run never splits into two chains. Insert-once still
+  protects the score if two copies overlap. Worst case: one batch paid for
+  twice, never counted twice. A per-run lease would remove even that; not worth
+  the extra state at this scale.
+- **The give-up happens in the worker, not in `queueRetry`.** The queue's retry
+  hook is synchronous and has no database. So the 9th delivery fails the run
+  itself, quoting the last error that `noteRunError` kept on the run.
+- **Budget, dataset and runs commit in one transaction**, and messages are sent
+  after the commit. An over-budget request leaves nothing behind, and the worker
+  can never get a run id it can't see yet. A run whose send fails is marked
+  failed, not left queued forever.
+- **Spend limits.** Public requests: 20 cases per run (the v1 cap) and 60
+  case-runs per IP per day. The admin token allows 1,000 cases and skips the IP
+  budget. A global `DAILY_SPEND_CAP_USD` (default $5) applies to everyone and is
+  checked before every batch, so it can be overshot by at most one batch.
+  Outer backstop: a monthly limit set in the Anthropic Console (Day 4).
+
+**Known gaps (on purpose for now)**
+- A run whose message is lost (for example, retention expired) stays `running`.
+  Day 4: an admin re-enqueue for stuck or failed runs. It starts a new chain at
+  a fresh `seq`, and `pendingCases` makes that safe.
+- Cost of a failed call isn't recorded (for example, the model call before a
+  judge failure), so the spend cap undercounts slightly.
+- `spentTodayUsd` scans today's results on each batch. Fine at demo scale; an
+  index on `results(created_at)` fixes it if it ever matters.
+- Day 4 check: confirm on the preview that a forged POST to the queue route is
+  rejected. Even if it isn't, it can only re-run missing cases of an existing
+  unfinished run.
+
+**Next (Day 3):** the UI launches runs through `POST /api/runs` and polls
+`GET /api/runs/[id]` (needs a results list endpoint), a `/runs/[id]` share page,
+a `/diff?a=&b=` page, and a one-time import of localStorage history (source
+`import`). Then delete `/api/run-case` and the in-memory `rate-limit.ts`.

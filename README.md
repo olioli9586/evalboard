@@ -64,11 +64,35 @@ default 60).
 `npm test` runs the unit tests (Vitest). The Anthropic client is stubbed, so
 no API key is needed and no calls are billed.
 
-### Database (v2, in progress)
+### Server-side runs (v2, in progress)
 
 Schema lives in `db/migrations/*.sql` (plain SQL, applied in order, each in a
 transaction, checksummed in `schema_migrations`). `npm run db:migrate` applies
 pending migrations to `DATABASE_URL`.
+
+```
+POST /api/runs ──▶ one transaction: per-IP budget, dataset, one queued run per
+                   model x prompt ──▶ enqueue {runId, seq: 0} per run
+                                          │
+Vercel Queues (eval-batches) ──▶ /api/queues/eval-batch, one batch per delivery:
+   · the next 5 cases with no result row, run concurrently
+   · each result is insert-once on (run_id, case_id)
+   · then finish the run, or enqueue {runId, seq + 1}
+   · a failed batch is redelivered (15 s doubling to 5 min) and redoes only
+     the missing cases; the 9th delivery fails the run
+GET /api/runs/[id] ──▶ status and score so far
+```
+
+Each model call retries 429 / 5xx / dropped connections up to 4 attempts
+(exponential backoff, full jitter, honoring `retry-after`); the attempt count
+is stored on the result row.
+
+| Env var | Default | What it does |
+|---|---|---|
+| `DATABASE_URL` | none | Postgres connection string (Neon in production) |
+| `DAILY_SPEND_CAP_USD` | `5` | Model + judge spend per day across everyone; checked before each batch |
+| `DEMO_DAILY_CASE_LIMIT` | `60` | Cases x runs per IP per day for public requests |
+| `EVALBOARD_ADMIN_TOKEN` | none | `Authorization: Bearer <token>` lifts the 20-case cap to 1,000 and skips the per-IP budget (the spend cap still applies) |
 
 ### Tests
 
