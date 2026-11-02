@@ -1,6 +1,7 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import type { Db } from "./db";
 import type { CaseResult, EvalCase, GraderKind } from "./eval";
+import type { LegacyImport } from "./import";
 
 // ---------------------------------------------------------------------------
 // Data access for datasets, runs, and results. Every function takes the Db to
@@ -22,6 +23,7 @@ export interface Run {
   status: RunStatus;
   totalCases: number;
   error: string | null;
+  importedFrom: string | null; // the v1 run's id, for runs copied from browser history
   createdAt: Date;
   startedAt: Date | null;
   finishedAt: Date | null;
@@ -73,8 +75,8 @@ export interface ResultRow {
 const RUN_COLUMNS = `
   id, dataset_id as "datasetId", group_id as "groupId", model,
   system_prompt as "systemPrompt", prompt_label as "promptLabel", grader, status,
-  total_cases as "totalCases", error, created_at as "createdAt",
-  started_at as "startedAt", finished_at as "finishedAt"`;
+  total_cases as "totalCases", error, imported_from as "importedFrom",
+  created_at as "createdAt", started_at as "startedAt", finished_at as "finishedAt"`;
 
 // Aggregates over one run's result rows.
 const SUMMARY_COLUMNS = `
@@ -162,6 +164,53 @@ export async function createRuns(
     ],
   );
   return rows;
+}
+
+// Stores one v1 history entry as finished runs, one per model, and returns
+// their ids. Run it inside a transaction. Every step is idempotent: the
+// dataset dedupes by content hash, the runs by (imported_from, model), the
+// results by (run_id, case_id). Importing the same entry again returns the
+// runs the first import made and writes nothing.
+//
+// Only pass/fail is imported. v1 kept latency and cost as per-model averages,
+// not per case, and a client-supplied cost would count toward today's spend
+// cap; so imported rows have no latency and zero cost.
+export async function importRun(db: Db, run: LegacyImport): Promise<{ id: string; model: string }[]> {
+  const dataset = await upsertDataset(db, { name: run.datasetName, source: run.source, cases: run.cases });
+  await db.query(
+    `insert into runs (dataset_id, group_id, grader, total_cases, model, system_prompt, status,
+       imported_from, created_at, started_at, finished_at)
+     select $1, $2, $3, $4, m, $5, 'succeeded', $6, $7, $7, $7
+     from unnest($8::text[]) as m
+     on conflict (imported_from, model) where imported_from is not null do nothing`,
+    [
+      dataset.id,
+      randomUUID(),
+      run.grader,
+      run.cases.length,
+      run.system,
+      run.legacyId,
+      run.at,
+      run.models.map((m) => m.model),
+    ],
+  );
+  const rows = run.models.flatMap((m) => m.passes.map((pass, position) => ({ model: m.model, position, pass })));
+  // Results join through the stored run, so they always land on that run's
+  // own dataset, even if a later import of the same id sent other cases.
+  await db.query(
+    `insert into results (run_id, case_id, pass, error)
+     select r.id, c.id, t.pass, case when t.pass is null then 'Not graded in the original run.' end
+     from unnest($2::text[], $3::int[], $4::boolean[]) as t(model, position, pass)
+     join runs r on r.imported_from = $1 and r.model = t.model
+     join cases c on c.dataset_id = r.dataset_id and c.position = t.position
+     on conflict (run_id, case_id) do nothing`,
+    [run.legacyId, rows.map((r) => r.model), rows.map((r) => r.position), rows.map((r) => r.pass)],
+  );
+  const { rows: runs } = await db.query<{ id: string; model: string }>(
+    "select id, model from runs where imported_from = $1 order by model",
+    [run.legacyId],
+  );
+  return runs;
 }
 
 export async function getRun(db: Db, id: string): Promise<Run | null> {

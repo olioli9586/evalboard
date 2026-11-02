@@ -8,6 +8,12 @@ import { createHash, timingSafeEqual } from "node:crypto";
 export const MAX_PUBLIC_CASES = 20; // same cap the v1 browser runner had
 export const MAX_ADMIN_CASES = 1000;
 
+// The history import makes no model calls but writes rows, so it is limited
+// too. The counters live in usage_daily under their own keys, apart from the
+// case budget: "import:<ip>" per IP and "import:all" for everyone.
+export const IMPORTS_PER_IP_PER_DAY = 2; // the import runs once; 2 allows a retry
+export const IMPORTS_PER_DAY = 100;
+
 // A blank or non-numeric value falls back to the default: NaN would make
 // every `spent >= cap` comparison false and switch the limit off.
 function envNumber(name: string, fallback: number): number {
