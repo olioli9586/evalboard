@@ -20,8 +20,8 @@ export interface CreateRunsRequest {
   prompts: { system: string; label?: string }[];
 }
 
-// Checked field by field like the v1 route: the body is untrusted, and a
-// wrong type would otherwise slip past the length checks.
+// Checked field by field: the body is untrusted, and a wrong type would
+// otherwise slip past the length checks.
 export function parseCreateRuns(
   body: unknown,
   maxCases: number,

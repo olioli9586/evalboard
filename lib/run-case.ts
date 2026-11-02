@@ -3,8 +3,8 @@ import { cost, exactMatch, type CaseResult, type GraderKind } from "./eval";
 import { isRetryable, NO_RETRY, retryAfterMs, withRetry, type RetryOptions } from "./retry";
 
 // ---------------------------------------------------------------------------
-// Run one case: call the target model, then grade the output. Shared by the
-// v1 per-case route and the v2 queue worker, so both grade the same way.
+// Run one case: call the target model, then grade the output. The queue
+// worker calls it once per case.
 // ---------------------------------------------------------------------------
 
 export const FALLBACK_MODEL = "claude-opus-4-8";
