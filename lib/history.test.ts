@@ -4,8 +4,8 @@ import {
   clearLegacyRuns,
   loadHistory,
   loadLegacyRuns,
+  forgetRuns,
   MAX_HISTORY,
-  pruneHistory,
   removeFromHistory,
 } from "./history";
 
@@ -51,11 +51,14 @@ describe("history", () => {
     expect(kept[0]).toBe(ids.at(-1));
   });
 
-  it("removes one id, or every id the server doesn't know", () => {
+  it("removes one id, or the ids the server doesn't know", () => {
     const [a, b, c] = [id(), id(), id()];
     addToHistory([a, b, c]);
     expect(removeFromHistory(b)).toEqual([a, c]);
-    expect(pruneHistory(new Set([c]))).toEqual([c]);
+    // A run launched while the lookup was in flight is kept.
+    const d = id();
+    addToHistory([d]);
+    expect(forgetRuns([a])).toEqual([d, c]);
   });
 
   it("ignores corrupt JSON, the wrong shape, and ids that aren't run ids", () => {

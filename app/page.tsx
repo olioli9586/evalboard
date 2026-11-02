@@ -19,9 +19,9 @@ import { MODELS, parseCustomCases, SAMPLES, type EvalCase, type GraderKind } fro
 import {
   addToHistory,
   clearLegacyRuns,
+  forgetRuns,
   loadHistory,
   loadLegacyRuns,
-  pruneHistory,
   removeFromHistory,
 } from "@/lib/history";
 import type { ResultRow, Run, RunListItem, RunSummary } from "@/lib/store";
@@ -107,7 +107,8 @@ export default function Home() {
       const data = await res.json().catch(() => null);
       if (!res.ok || !data) throw new Error(data?.error ?? `HTTP ${res.status}`);
       const runs: HistoryRun[] = data.runs;
-      pruneHistory(new Set(runs.map((r) => r.id)));
+      const found = new Set(runs.map((r) => r.id));
+      forgetRuns(ids.filter((id) => !found.has(id)));
       setHistory(runs);
       setHistoryError("");
     } catch (err) {

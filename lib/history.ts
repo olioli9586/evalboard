@@ -47,9 +47,11 @@ export function removeFromHistory(id: string): string[] {
   return persist(loadHistory().filter((x) => x !== id));
 }
 
-// Drops ids the server no longer knows (for example after a database reset).
-export function pruneHistory(known: Set<string>): string[] {
-  return persist(loadHistory().filter((id) => known.has(id)));
+// Drops ids the server said it doesn't know (for example after a database
+// reset). Only those: ids added since the request went out stay.
+export function forgetRuns(ids: string[]): string[] {
+  const gone = new Set(ids);
+  return persist(loadHistory().filter((id) => !gone.has(id)));
 }
 
 // The raw v1 entries; the server validates them.
