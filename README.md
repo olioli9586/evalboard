@@ -12,21 +12,31 @@ this is the tool I use to prove which model/prompt combination actually works.
 ## How it works
 
 ```
-Browser ── one POST per (model × case) ──▶ /api/run-case
-             (client-side worker pool,          │
-              concurrency 3)                    ├─ 1. target model completes the case
-                                                ├─ 2. grader scores it:
-                                                │    · exact  — normalized string equality
-                                                │    · judge  — Opus 4.8 verdict, strict JSON schema
-                                                └─ 3. returns {output, pass, reasoning,
-                                                     latency, tokens, cost}
+Browser ── POST /api/runs ──▶ one transaction: per-IP budget, dataset, one queued
+   │                          run per model x prompt ──▶ enqueue {runId, seq: 0}
+   │                                                         │
+   │        Vercel Queues (eval-batches) ──▶ /api/queues/eval-batch, one batch per delivery:
+   │           · the next 5 cases with no result row, run concurrently
+   │           · each case: target model completes it, then the grader scores it
+   │             (exact: normalized string equality · judge: Opus 4.8 verdict, strict JSON schema)
+   │           · each result is insert-once on (run_id, case_id)
+   │           · then finish the run, or enqueue {runId, seq + 1}
+   │
+   └── polls GET /api/runs/[id] every 2 s ──▶ status, score, per-case results (Postgres)
 ```
 
 - **Datasets**: two built-in samples (classification with exact match; extraction
   with LLM judge) or paste your own as `input | expected` lines.
-- **The readout**: per-model scorecards — pass rate, a test strip (one square per
-  case, click to inspect), average latency, total cost.
-- **Case detail**: input, expected, output, judge reasoning, and telemetry.
+- **The readout**: per-model scorecards — pass rate, one bubble per case (click to
+  inspect), average latency, total cost. Runs live on the server, so closing the
+  tab doesn't stop them.
+- **Share links**: `/runs/[id]` shows a run with every case's output and
+  verdict, and updates itself while the run is in progress.
+- **Regression view**: `/diff?a=..&b=..` compares two runs of the same dataset
+  case by case: what got fixed, what regressed, and both answers side by side.
+- **History**: the browser keeps the ids of the runs it launched; scores come
+  from the server. History saved by the first version (in localStorage) is
+  moved to the server once, on first load.
 - **Export**: full run as JSON.
 
 ## Design decisions
@@ -37,64 +47,65 @@ Browser ── one POST per (model × case) ──▶ /api/run-case
   a case failed.
 - **Exact match is normalized** (case, trailing punctuation) — classification
   evals shouldn't fail on "Billing." vs "billing".
-- **Client-side worker pool** (concurrency 3) instead of one long server job:
-  every case is an independent short request, so results stream into the UI as
-  they land, failures are isolated per-cell, and nothing fights serverless
-  execution limits.
+- **Queue-driven worker instead of one long request.** A run is a chain of
+  short batches, so it can take longer than the 300 s function limit, and a
+  batch that dies halfway is redelivered and redoes only its missing cases.
+  Results are insert-once on `(run_id, case_id)`, so a retry can never count a
+  case twice. Each model call retries 429 / 5xx / dropped connections up to 4
+  attempts (exponential backoff, full jitter, honoring `retry-after`); a batch
+  that still fails goes back to the queue (15 s doubling to 5 min, given up
+  after 8 deliveries).
+- **Share ids are the access control.** Run ids are random UUIDs and there is
+  no endpoint that lists everyone's runs; share pages are `noindex`.
 - **Cost is a first-class metric.** Every result carries token counts and a
   dollar figure computed from a price table; the scorecard totals them. Model
   choice is an economics question, not just an accuracy question.
 - **Model fallback**: if a requested model returns 404 (retired), the case
   transparently reruns on `claude-opus-4-8` and the result records which model
   actually served it.
-- **Demo guardrails**: per-IP daily case budget, case/input length caps.
+- **Demo guardrails**: per-IP daily case budget and a global daily spend cap,
+  both in Postgres so they hold across serverless instances; case and input
+  length caps.
 
 ## Run locally
 
+You need Postgres (any version from 14 on; for example
+`docker run -d -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=evalboard -p 5432:5432 postgres:17`).
+
 ```bash
 npm install
-echo "ANTHROPIC_API_KEY=sk-ant-..." > .env.local
+cat > .env.local <<'ENV'
+ANTHROPIC_API_KEY=sk-ant-...
+DATABASE_URL=postgres://postgres:postgres@localhost:5432/evalboard
+EVALBOARD_QUEUE=inline
+ENV
+npm run db:migrate
 npm run dev
 ```
 
-Optional settings in `.env.local`: `EVALBOARD_JUDGE_MODEL` (default
-`claude-opus-4-8`) and `DEMO_DAILY_CASE_LIMIT` (cases per IP per day,
-default 60).
-
-`npm test` runs the unit tests (Vitest). The Anthropic client is stubbed, so
-no API key is needed and no calls are billed.
-
-### Server-side runs (v2, in progress)
+`EVALBOARD_QUEUE=inline` runs the batches inside the dev server instead of
+Vercel Queues, with the same worker code and retry delays, so no Vercel
+project is needed. It refuses to run in production. Without it, runs go
+through Vercel Queues, which needs `vercel link` and `vercel env pull`.
 
 Schema lives in `db/migrations/*.sql` (plain SQL, applied in order, each in a
 transaction, checksummed in `schema_migrations`). `npm run db:migrate` applies
 pending migrations to `DATABASE_URL`.
 
-```
-POST /api/runs ──▶ one transaction: per-IP budget, dataset, one queued run per
-                   model x prompt ──▶ enqueue {runId, seq: 0} per run
-                                          │
-Vercel Queues (eval-batches) ──▶ /api/queues/eval-batch, one batch per delivery:
-   · the next 5 cases with no result row, run concurrently
-   · each result is insert-once on (run_id, case_id)
-   · then finish the run, or enqueue {runId, seq + 1}
-   · a failed batch is redelivered (15 s doubling to 5 min) and redoes only
-     the missing cases; the 9th delivery fails the run
-GET /api/runs/[id] ──▶ status and score so far
-```
-
-Each model call retries 429 / 5xx / dropped connections up to 4 attempts
-(exponential backoff, full jitter, honoring `retry-after`); the attempt count
-is stored on the result row.
-
 | Env var | Default | What it does |
 |---|---|---|
+| `ANTHROPIC_API_KEY` | none | Required |
 | `DATABASE_URL` | none | Postgres connection string (Neon in production) |
+| `EVALBOARD_QUEUE` | Vercel Queues | `inline` runs batches in the dev server (development only) |
+| `EVALBOARD_JUDGE_MODEL` | `claude-opus-4-8` | Model used by the LLM judge |
 | `DAILY_SPEND_CAP_USD` | `5` | Model + judge spend per day across everyone; checked before each batch |
 | `DEMO_DAILY_CASE_LIMIT` | `60` | Cases x runs per IP per day for public requests |
 | `EVALBOARD_ADMIN_TOKEN` | none | `Authorization: Bearer <token>` lifts the 20-case cap to 1,000 and skips the per-IP budget (the spend cap still applies) |
 
 ### Tests
+
+`npm test` runs the unit tests (Vitest). The Anthropic client is stubbed, so
+no API key is needed and no calls are billed.
 
 `npm run test:db` runs the Postgres integration tests against
 `TEST_DATABASE_URL`. They wipe that database's `public` schema, so the database
@@ -110,11 +121,11 @@ CI runs both suites; the DB job uses a Postgres 17 service container.
 
 ## Tech
 
-Next.js 16 (App Router) · TypeScript · Tailwind CSS · Anthropic SDK · Vercel
+Next.js 16 (App Router) · TypeScript · Tailwind CSS · Anthropic SDK · Postgres (`pg`, plain SQL migrations) · Vercel Queues · Vercel
 
 ## Roadmap
 
-- [ ] Persist runs to Postgres and diff two runs (regression view)
+- [x] Persist runs to Postgres and diff two runs (regression view)
 - [ ] Prompt variants: A/B two system prompts on the same dataset
 - [ ] CSV dataset upload
 - [ ] Statistical significance hints for small datasets

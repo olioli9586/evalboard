@@ -9,8 +9,8 @@ with what was done, what was decided and why, and the next step.
 |---|---|---|
 | 1 | Schema, migrations, data-access layer, Postgres tests in CI | done |
 | 2 | `POST /api/runs`, queue worker (Vercel Queues), retry with backoff, spend caps, kill/resume test | done |
-| 3 | UI on server runs, `/runs/[id]`, `/diff`, one-time localStorage import | next |
-| 4 | Neon + Queues setup, preview deploy, 250-case Banking77 run, fault-injection resume, record numbers | |
+| 3 | UI on server runs, `/runs/[id]`, `/diff`, one-time localStorage import | done |
+| 4 | Neon + Queues setup, preview deploy, 250-case Banking77 run, fault-injection resume, record numbers | next |
 | 5 | Prompt A/B, CSV upload | |
 | 6 | Hand-label 50 cases, judge kappa, README, RESULTS.md, fresh-context review, PR | |
 
@@ -162,3 +162,118 @@ redelivers it, and checks for no duplicates and the same score.
 `GET /api/runs/[id]` (needs a results list endpoint), a `/runs/[id]` share page,
 a `/diff?a=&b=` page, and a one-time import of localStorage history (source
 `import`). Then delete `/api/run-case` and the in-memory `rate-limit.ts`.
+
+## Day 3 (2026-11-02)
+
+**Done**
+- `GET /api/runs/[id]` now includes the per-case results. `GET /api/runs?ids=`
+  returns the scores of up to 100 runs in one query, for the history panel.
+- One-time import of v1 history: `POST /api/runs/import`, and migration 002
+  adds `runs.imported_from`.
+- `EVALBOARD_QUEUE=inline`: `npm run dev` runs batches in-process, so local
+  development needs no Vercel project.
+- UI: the home page launches runs through `POST /api/runs` and polls them.
+  `/runs/[id]` is the share page and refreshes itself while the run is in
+  progress. `/diff?a=&b=` compares two runs case by case. Added not-found and
+  error pages.
+- Removed `/api/run-case` and the in-memory `lib/rate-limit.ts`. The v1
+  route's grading and fallback tests moved to `lib/run-case.test.ts`, so
+  `runCase` kept that coverage.
+- Tests: 69 unit and 56 Postgres (were 81 and 40; the unit count dropped
+  because the 19 v1 route tests and 6 rate-limit tests went away with the
+  code, and 8 of them came back as `runCase` tests).
+- Mutation check on the import: three planted bugs (results joined to cases
+  by position alone, no conflict clause on the runs insert, a refused quota
+  returning instead of rolling back) each made a test fail.
+- End to end on this machine, with no API spend: a fake Anthropic server
+  (`ANTHROPIC_BASE_URL`), a local Postgres and the inline queue.
+  - A 20-case x 3-model run went through 4 batches per run in about 9 s. The
+    fake server's 529s were absorbed by per-call retry; 10 result rows record
+    2 or 3 attempts.
+  - Headless Chrome (a throwaway profile):
+    - v1 history seeded in localStorage was imported on first load and the
+      old key removed.
+    - A launch filled its 16 bubbles live, and the case detail opened.
+    - Picking two runs gave a Compare link that opened the diff page.
+    - A run page refreshed itself from running to finished.
+  - The per-IP import limit also showed up in this test. After two curl
+    imports the browser's import got a 429, and the page kept the old
+    history for the next visit, as designed.
+
+**Decisions and why**
+- **No "list all runs" endpoint.** A run's id is its share key; a public list
+  would show everyone's prompts and cases. The browser keeps the ids it
+  launched (`evalboard-history`, max 100) and asks for their scores in one
+  batch request. A lateral subquery aggregates each run's results on its own
+  key, so this is one query instead of one request per run.
+- **The import is idempotent through the schema, not through app logic.**
+  - Datasets dedupe by content hash.
+  - Runs dedupe by a unique index on `(imported_from, model)`, with
+    `ON CONFLICT DO NOTHING`.
+  - Results dedupe by their primary key.
+  - So importing the same history twice, even from two tabs at once (tested),
+    returns the same run ids and writes nothing new. It is the same
+    insert-once idea as the worker.
+- **Only pass/fail is imported.** v1 kept latency and cost as per-model
+  averages, not per case, so filling each row with the average would invent
+  per-case data. And a client-sent cost would count toward today's spend
+  cap, so a forged import could use up the demo for everyone. Imported rows
+  have zero cost and no latency, and the run page says so.
+- **Built-in samples are recognized by their exact inputs.** That brings back
+  the expected answers v1 never saved. Then the cases hash to the same dataset
+  as new runs of that sample, so an old v1 run and a new v2 run can be diffed
+  directly (checked in the browser test).
+- **Import limits.**
+  - Per request: 20 runs, 20 cases each, 100k characters.
+  - Per day: 2 imports per IP and 100 overall. The counters live in
+    `usage_daily` under `import:` keys, apart from the case budget.
+  - A refused quota throws inside the transaction, so the per-IP count rolls
+    back when the global one is full.
+  - Invalid entries are skipped, not fatal.
+- **Results are joined to cases through the stored run.** A second import
+  that reuses an id with different cases can't write rows onto another
+  dataset (tested; one of the mutations).
+- **Share pages read the database directly** (server components, no API hop).
+  - `connection()` makes them render per request, so a finished run never
+    shows a cached "running" page.
+  - They are `noindex`.
+  - While a run is unfinished, a tiny client component calls
+    `router.refresh()` every 3 s. It isn't rendered once the run is done, so
+    the polling stops by itself.
+- **The home page polls each launched run every 2 s** and stops polling each
+  one when it finishes. Every run is fetched at least once, so a run that
+  failed to queue shows its error.
+- **Inline queue for local development** (part of the approved design). It
+  refuses production: a serverless function can be frozen once its response
+  is sent, which would strand a run halfway. Retries use `queueRetry`, so
+  local behavior matches the real queue.
+- **"Running" bubbles are the next batch, not every missing case.** The worker
+  takes the 5 lowest missing positions, so those pulse and the rest show as
+  waiting. It is an estimate (once part of a batch is done, the next cases
+  shown are still waiting), noted in the code. `BATCH_SIZE` moved to
+  `lib/eval.ts` so browser code can import it.
+- **Diff: a is the baseline, b the candidate.** Picking two runs from history
+  makes the older one the baseline. The page lists only cases that flipped
+  (fixed or regressed), with input and expected shown once and the two
+  answers side by side.
+
+**Known gaps**
+- Reloading the home page mid-run drops the live scoreboard. The run keeps
+  going, and the history row and share page show its progress.
+- A v1 history over the 100k-character import cap stays in localStorage, and
+  the import is retried (and refused) on each visit. Unlikely with v1's caps.
+- `docs/home.png` still shows the v1 page. Retake it after the Day 4 deploy.
+- Still open from Day 2: re-enqueue for stuck runs, the forged-callback check,
+  and the Anthropic Console limit (all Day 4).
+
+**Next (Day 4)** (needs account clicks in Neon and Vercel):
+- A new Neon project and Vercel Queues on the Vercel project.
+- Env vars on Vercel: `DATABASE_URL`, `DAILY_SPEND_CAP_USD`,
+  `EVALBOARD_ADMIN_TOKEN`. Then `npm run db:migrate` against Neon.
+- A preview deploy, then a 250-case Banking77 run with the admin token, past
+  300 s.
+- Fault injection on the real queue: kill a batch, check it resumes with no
+  duplicates.
+- Admin re-enqueue for stuck runs, the forged-callback check, and a monthly
+  limit in the Anthropic Console.
+- Open a share link in a private window, and record the numbers.
