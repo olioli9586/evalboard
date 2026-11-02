@@ -3,8 +3,9 @@ import { send } from "@vercel/queue";
 // ---------------------------------------------------------------------------
 // The worker's only link to the queue. Each message says "process the next
 // batch of this run"; the worker sends the following one when it finishes.
-// Tests pass their own Enqueue, and moving to another queue (QStash, Inngest)
-// means rewriting this file and the consumer route, nothing else.
+// Tests pass their own Enqueue, local development can run batches in-process
+// (lib/inline-queue.ts), and moving to another queue (QStash, Inngest) means
+// rewriting this file and the consumer route, nothing else.
 // ---------------------------------------------------------------------------
 
 export const RUN_TOPIC = "eval-batches";
@@ -20,5 +21,11 @@ export type Enqueue = (msg: BatchMessage) => Promise<void>;
 // same key, and the queue delivers it only once, so a run never ends up with
 // two chains of batches.
 export const enqueueBatch: Enqueue = async (msg) => {
+  if (process.env.EVALBOARD_QUEUE === "inline") {
+    // Loaded on demand: it imports the worker, which imports this file.
+    const { deliverInline } = await import("./inline-queue");
+    deliverInline(msg);
+    return;
+  }
   await send(RUN_TOPIC, msg, { idempotencyKey: `${msg.runId}:${msg.seq}` });
 };
