@@ -6,8 +6,13 @@ import { withTransaction } from "./db";
 import {
   createRuns,
   finishRun,
+  getDataset,
   getRun,
   insertResult,
+  listCases,
+  listGroupRuns,
+  listResults,
+  listRunsById,
   markRunning,
   pendingCases,
   reserveCases,
@@ -192,6 +197,75 @@ describe("results", () => {
       costUsd: 0.003,
     });
     expect(await spentTodayUsd(db)).toBeCloseTo(0.003, 6);
+  });
+});
+
+describe("reads for the run pages", () => {
+  it("lists results in dataset order, keyed by position, with pending cases left out", async () => {
+    const run = await seedRun();
+    const [c0, , c2] = await pendingCases(db, run.id, 3);
+    await insertResult(db, run.id, c2.id, graded(false, { reasoning: "Wrong label.", cost_usd: 0.0025 }), 3);
+    await insertResult(db, run.id, c0.id, graded(true));
+
+    const rows = await listResults(db, run.id);
+    expect(rows.map((r) => r.position)).toEqual([0, 2]);
+    expect(rows[1]).toEqual({
+      position: 2,
+      output: "bug",
+      pass: false,
+      error: null,
+      latencyMs: 100,
+      inputTokens: 10,
+      outputTokens: 2,
+      costUsd: 0.0025,
+      reasoning: "Wrong label.",
+      modelUsed: "claude-haiku-4-5",
+      attempts: 3,
+    });
+  });
+
+  it("reads a dataset and its cases in order", async () => {
+    const run = await seedRun();
+    expect(await getDataset(db, run.datasetId)).toMatchObject({ name: "triage", source: "sample", caseCount: 3 });
+    expect((await listCases(db, run.datasetId)).map((c) => [c.position, c.input])).toEqual(
+      CASES.map((c, i) => [i, c.input]),
+    );
+    expect(await getDataset(db, randomUUID())).toBeNull();
+  });
+
+  it("lists runs by id with their scores, newest first, skipping unknown ids", async () => {
+    const older = await seedRun();
+    const newer = await seedRun();
+    await db.query("update runs set created_at = now() - interval '1 hour' where id = $1", [older.id]);
+    const [c0, c1] = await pendingCases(db, newer.id, 2);
+    await insertResult(db, newer.id, c0.id, graded(true));
+    await insertResult(db, newer.id, c1.id, { error: "refused" });
+
+    const items = await listRunsById(db, [older.id, randomUUID(), newer.id]);
+    expect(items.map((r) => r.id)).toEqual([newer.id, older.id]);
+    expect(items[0]).toMatchObject({ datasetName: "triage", status: "queued", model: "claude-haiku-4-5" });
+    expect(items[0].summary).toEqual({ done: 2, graded: 1, passed: 1, errored: 1, avgLatencyMs: 100, costUsd: 0.001 });
+    // A run with no results still comes back, scored zero.
+    expect(items[1].summary).toEqual({ done: 0, graded: 0, passed: 0, errored: 0, avgLatencyMs: 0, costUsd: 0 });
+    expect(await listRunsById(db, [])).toEqual([]);
+  });
+
+  it("lists the runs launched together", async () => {
+    const ds = await withTransaction((c) => upsertDataset(c, { name: "triage", source: "sample", cases: CASES }), db);
+    const groupId = randomUUID();
+    const runs = await createRuns(db, {
+      datasetId: ds.id,
+      groupId,
+      grader: "exact",
+      totalCases: 3,
+      variants: [
+        { model: "claude-sonnet-4-6", systemPrompt: "A" },
+        { model: "claude-haiku-4-5", systemPrompt: "A" },
+      ],
+    });
+    await seedRun(); // another launch, not in the group
+    const group = await listGroupRuns(db, groupId);
+    expect(group.map((r) => r.id).sort()).toEqual(runs.map((r) => r.id).sort());
   });
 });
 

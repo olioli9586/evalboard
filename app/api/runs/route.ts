@@ -11,9 +11,41 @@ import {
 } from "@/lib/limits";
 import { enqueueBatch } from "@/lib/queue";
 import { parseCreateRuns } from "@/lib/run-request";
-import { createRuns, finishRun, reserveCases, spentTodayUsd, upsertDataset, type Run } from "@/lib/store";
+import {
+  createRuns,
+  finishRun,
+  isUuid,
+  listRunsById,
+  reserveCases,
+  spentTodayUsd,
+  upsertDataset,
+  type Run,
+} from "@/lib/store";
 
 export const runtime = "nodejs";
+
+// Matches the history list a browser keeps (lib/history.ts).
+const MAX_LIST_IDS = 100;
+
+// Scores for a list of run ids: the history panel loads in one request
+// instead of one per run. Only runs whose ids the caller already has come back.
+export async function GET(req: NextRequest) {
+  const raw = new URL(req.url).searchParams.get("ids") ?? "";
+  const ids = [...new Set(raw.split(",").filter(Boolean))];
+  if (ids.length > MAX_LIST_IDS) {
+    return Response.json({ error: `At most ${MAX_LIST_IDS} ids.` }, { status: 400 });
+  }
+  if (!ids.every(isUuid)) {
+    return Response.json({ error: "ids must be run ids." }, { status: 400 });
+  }
+  if (ids.length === 0) return Response.json({ runs: [] });
+  try {
+    return Response.json({ runs: await listRunsById(getPool(), ids) });
+  } catch (err) {
+    console.error("[runs] list failed:", err);
+    return Response.json({ error: "Could not load the runs." }, { status: 500 });
+  }
+}
 
 // Creates one queued run per model x prompt and hands each to the queue. The
 // response comes back right away; the worker does the model calls.

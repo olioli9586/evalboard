@@ -41,11 +41,49 @@ export interface RunSummary {
   costUsd: number;
 }
 
+// A run as listed in history: the run, its dataset's name, and its score.
+export interface RunListItem extends Run {
+  datasetName: string;
+  summary: RunSummary;
+}
+
+export interface Dataset {
+  id: string;
+  name: string;
+  source: DatasetSource;
+  caseCount: number;
+  createdAt: Date;
+}
+
+// One result row, keyed by the case's position in its dataset.
+export interface ResultRow {
+  position: number;
+  output: string;
+  pass: boolean | null;
+  error: string | null;
+  latencyMs: number | null;
+  inputTokens: number;
+  outputTokens: number;
+  costUsd: number;
+  reasoning: string;
+  modelUsed: string | null;
+  attempts: number;
+}
+
 const RUN_COLUMNS = `
   id, dataset_id as "datasetId", group_id as "groupId", model,
   system_prompt as "systemPrompt", prompt_label as "promptLabel", grader, status,
   total_cases as "totalCases", error, created_at as "createdAt",
   started_at as "startedAt", finished_at as "finishedAt"`;
+
+// Aggregates over one run's result rows.
+const SUMMARY_COLUMNS = `
+  count(*)::int as done,
+  count(pass)::int as graded,
+  count(*) filter (where pass)::int as passed,
+  count(*) filter (where pass is null)::int as errored,
+  coalesce(round(avg(latency_ms) filter (where pass is not null)), 0)::int as "avgLatencyMs",
+  coalesce(sum(cost_usd), 0)::float8 as "costUsd"`;
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -131,10 +169,68 @@ export async function getRun(db: Db, id: string): Promise<Run | null> {
   return rows[0] ?? null;
 }
 
-export async function listRuns(db: Db, limit = 50): Promise<Run[]> {
-  const { rows } = await db.query<Run>(
-    `select ${RUN_COLUMNS} from runs order by created_at desc limit $1`,
-    [limit],
+// Runs by id, newest first, each with its score. There is deliberately no
+// "list all runs": a run's id is its share key, so a browser only sees the
+// runs it launched or was sent a link to. Unknown ids are left out.
+export async function listRunsById(db: Db, ids: string[]): Promise<RunListItem[]> {
+  return listRunItems(db, "id = any($1::uuid[])", [ids]);
+}
+
+// The runs launched together with one run (other models, other prompt), so a
+// run page can offer them for a diff.
+export async function listGroupRuns(db: Db, groupId: string): Promise<RunListItem[]> {
+  return listRunItems(db, "group_id = $1", [groupId]);
+}
+
+async function listRunItems(db: Db, where: string, params: unknown[]): Promise<RunListItem[]> {
+  // The lateral subquery aggregates each run's results on their own, using
+  // the (run_id, case_id) key; a run with no results still gets a row of zeros.
+  const { rows } = await db.query<Run & RunSummary & { datasetName: string }>(
+    `select r.*, d.name as "datasetName", s.*
+     from (select ${RUN_COLUMNS} from runs where ${where}) r
+     join datasets d on d.id = r."datasetId"
+     cross join lateral (
+       select ${SUMMARY_COLUMNS} from results where run_id = r.id
+     ) s
+     order by r."createdAt" desc, r.model`,
+    params,
+  );
+  return rows.map(({ done, graded, passed, errored, avgLatencyMs, costUsd, ...run }) => ({
+    ...run,
+    summary: { done, graded, passed, errored, avgLatencyMs, costUsd },
+  }));
+}
+
+export async function getDataset(db: Db, id: string): Promise<Dataset | null> {
+  const { rows } = await db.query<Dataset>(
+    `select id, name, source, case_count as "caseCount", created_at as "createdAt"
+     from datasets where id = $1`,
+    [id],
+  );
+  return rows[0] ?? null;
+}
+
+export async function listCases(db: Db, datasetId: string): Promise<StoredCase[]> {
+  const { rows } = await db.query<StoredCase>(
+    "select id, position, input, expected from cases where dataset_id = $1 order by position",
+    [datasetId],
+  );
+  return rows;
+}
+
+// The results a run has so far, in dataset order. Cases still pending have no
+// row; callers match rows to cases by position.
+export async function listResults(db: Db, runId: string): Promise<ResultRow[]> {
+  const { rows } = await db.query<ResultRow>(
+    `select c.position, res.output, res.pass, res.error, res.latency_ms as "latencyMs",
+       res.input_tokens as "inputTokens", res.output_tokens as "outputTokens",
+       res.cost_usd::float8 as "costUsd", res.judge_reasoning as reasoning,
+       res.model_used as "modelUsed", res.attempts
+     from results res
+     join cases c on c.id = res.case_id
+     where res.run_id = $1
+     order by c.position`,
+    [runId],
   );
   return rows;
 }
@@ -226,14 +322,7 @@ export async function insertResult(
 
 export async function runSummary(db: Db, runId: string): Promise<RunSummary> {
   const { rows } = await db.query<RunSummary>(
-    `select
-       count(*)::int as done,
-       count(pass)::int as graded,
-       count(*) filter (where pass)::int as passed,
-       count(*) filter (where pass is null)::int as errored,
-       coalesce(round(avg(latency_ms) filter (where pass is not null)), 0)::int as "avgLatencyMs",
-       coalesce(sum(cost_usd), 0)::float8 as "costUsd"
-     from results where run_id = $1`,
+    `select ${SUMMARY_COLUMNS} from results where run_id = $1`,
     [runId],
   );
   return rows[0];

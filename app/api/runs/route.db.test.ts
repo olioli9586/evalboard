@@ -1,6 +1,7 @@
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { NextRequest } from "next/server";
 import type pg from "pg";
+import { insertResult, pendingCases } from "@/lib/store";
 import { closeTestPool, freshDb, testPool } from "@/lib/test-db";
 
 // The routes run against the test database, and the queue is a spy.
@@ -12,7 +13,7 @@ vi.mock("@/lib/db", async (importOriginal) => ({
 const enqueueBatch = vi.hoisted(() => vi.fn());
 vi.mock("@/lib/queue", () => ({ enqueueBatch }));
 
-const { POST } = await import("./route");
+const { GET: LIST, POST } = await import("./route");
 const { GET } = await import("./[id]/route");
 
 let db: pg.Pool;
@@ -56,6 +57,10 @@ function get(id: string): Promise<Response> {
   return GET(new Request(`http://localhost/api/runs/${id}`) as unknown as NextRequest, {
     params: Promise.resolve({ id }),
   });
+}
+
+function list(query: string): Promise<Response> {
+  return LIST(new Request(`http://localhost/api/runs${query}`) as unknown as NextRequest);
 }
 
 const count = async (table: string) => (await db.query(`select count(*)::int as n from ${table}`)).rows[0].n;
@@ -178,13 +183,20 @@ describe("POST /api/runs", () => {
 });
 
 describe("GET /api/runs/[id]", () => {
-  it("returns the run and its score so far", async () => {
+  it("returns the run, its score so far and the results by position", async () => {
     const { runs } = await (await post(base)).json();
     const res = await get(runs[0].id);
     expect(res.status).toBe(200);
     const body = await res.json();
     expect(body.run).toMatchObject({ id: runs[0].id, status: "queued", totalCases: 2 });
     expect(body.summary).toMatchObject({ done: 0, passed: 0 });
+    expect(body.results).toEqual([]);
+
+    const [c] = await pendingCases(db, runs[0].id, 1);
+    await insertResult(db, runs[0].id, c.id, { error: "refused" });
+    const after = await (await get(runs[0].id)).json();
+    expect(after.summary).toMatchObject({ done: 1, errored: 1 });
+    expect(after.results).toMatchObject([{ position: 0, pass: null, error: "refused" }]);
   });
 
   it("answers 404 for an unknown or malformed id", async () => {
@@ -200,5 +212,36 @@ describe("GET /api/runs/[id]", () => {
     const res = await get(crypto.randomUUID());
     expect(res.status).toBe(500);
     expect(await res.json()).toEqual({ error: "Could not load the run." });
+  });
+});
+
+describe("GET /api/runs?ids=", () => {
+  it("returns the scores of the runs asked for, newest first", async () => {
+    vi.stubEnv("DEMO_DAILY_CASE_LIMIT", "100");
+    const a = await (await post(base)).json();
+    const b = await (await post({ ...base, models: ["claude-haiku-4-5"] })).json();
+    const ids = [...a.runs, ...b.runs].map((r: { id: string }) => r.id);
+    const res = await list(`?ids=${ids.join(",")},${crypto.randomUUID()}`);
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.runs).toHaveLength(3);
+    expect(body.runs[0]).toMatchObject({ datasetName: "Support ticket triage", summary: { done: 0 } });
+    expect(new Set(body.runs.map((r: { id: string }) => r.id))).toEqual(new Set(ids));
+  });
+
+  it("answers an empty list without a query and rejects bad or too many ids", async () => {
+    expect(await (await list("")).json()).toEqual({ runs: [] });
+    expect((await list("?ids=1;drop")).status).toBe(400);
+    const many = Array.from({ length: 101 }, () => crypto.randomUUID()).join(",");
+    expect((await list(`?ids=${many}`)).status).toBe(400);
+  });
+
+  it("answers a database failure with a JSON 500", async () => {
+    getPool.mockImplementationOnce(() => {
+      throw new Error("connection refused");
+    });
+    const res = await list(`?ids=${crypto.randomUUID()}`);
+    expect(res.status).toBe(500);
+    expect(await res.json()).toEqual({ error: "Could not load the runs." });
   });
 });
