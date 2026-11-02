@@ -87,14 +87,6 @@ const SUMMARY_COLUMNS = `
   coalesce(round(avg(latency_ms) filter (where pass is not null)), 0)::int as "avgLatencyMs",
   coalesce(sum(cost_usd), 0)::float8 as "costUsd"`;
 
-const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-
-// Postgres rejects a malformed uuid with an error, so ids from a URL or a
-// queue message are checked before they reach a query.
-export function isUuid(s: unknown): s is string {
-  return typeof s === "string" && UUID.test(s);
-}
-
 export function hashCases(cases: EvalCase[]): string {
   return createHash("sha256")
     .update(JSON.stringify(cases.map((c) => [c.input, c.expected])))

@@ -14,13 +14,13 @@ import { parseCreateRuns } from "@/lib/run-request";
 import {
   createRuns,
   finishRun,
-  isUuid,
   listRunsById,
   reserveCases,
   spentTodayUsd,
   upsertDataset,
   type Run,
 } from "@/lib/store";
+import { isUuid } from "@/lib/uuid";
 
 export const runtime = "nodejs";
 

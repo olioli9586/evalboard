@@ -1,8 +1,9 @@
 import type { Db } from "./db";
-import type { CaseResult } from "./eval";
+import { BATCH_SIZE, type CaseResult } from "./eval";
 import type { BatchMessage, Enqueue } from "./queue";
 import { CaseError, type CaseRequest } from "./run-case";
-import { finishRun, insertResult, isUuid, markRunning, noteRunError, pendingCases, spentTodayUsd } from "./store";
+import { finishRun, insertResult, markRunning, noteRunError, pendingCases, spentTodayUsd } from "./store";
+import { isUuid } from "./uuid";
 
 // ---------------------------------------------------------------------------
 // The queue worker. One delivery = one batch of a run's missing cases, run
@@ -16,7 +17,6 @@ import { finishRun, insertResult, isUuid, markRunning, noteRunError, pendingCase
 // cases it hadn't written yet; a duplicate delivery can't count a case twice.
 // ---------------------------------------------------------------------------
 
-export const BATCH_SIZE = 5;
 export const MAX_DELIVERIES = 8;
 
 export interface WorkerDeps {

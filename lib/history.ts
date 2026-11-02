@@ -1,74 +1,67 @@
-import type { GraderKind } from "./eval";
+import { isUuid } from "./uuid";
 
-// Saved-run history for diffing, kept in localStorage. A run summary stores
-// per-case pass booleans (null = errored/skipped) rather than full outputs —
-// small enough to keep ~20 runs, rich enough to diff case-by-case.
+// The runs this browser launched or imported, newest first, as a list of run
+// ids in localStorage. The runs themselves live on the server; the list only
+// says which ones are yours, because there is no public list of everyone's
+// runs to pick them from.
 
-export interface SavedModelResult {
-  passes: (boolean | null)[];
-  passRate: number; // 0-100, over graded cases
-  avgMs: number;
-  cost: number;
-}
+const KEY = "evalboard-history";
+export const MAX_HISTORY = 100; // also the most ids GET /api/runs?ids= takes
 
-export interface SavedRun {
-  id: string;
-  at: string; // ISO timestamp
-  dataset: string;
-  grader: GraderKind;
-  system: string;
-  // Two runs are diffable only if they evaluated the same cases.
-  caseKey: string;
-  caseCount: number;
-  models: Record<string, SavedModelResult>;
-}
+// v1 kept whole run summaries under this key. They are sent to
+// /api/runs/import once, then removed.
+const LEGACY_KEY = "evalboard-runs";
 
-const KEY = "evalboard-runs";
-const MAX_RUNS = 20;
-
-export function loadRuns(): SavedRun[] {
-  if (typeof window === "undefined") return [];
+function read(key: string): unknown {
+  if (typeof window === "undefined") return null;
   try {
-    const parsed: unknown = JSON.parse(localStorage.getItem(KEY) ?? "[]");
-    // Valid JSON of the wrong shape (e.g. "null") would otherwise crash the page.
-    if (!Array.isArray(parsed)) return [];
-    return parsed.filter(
-      (r): r is SavedRun =>
-        typeof r === "object" &&
-        r !== null &&
-        typeof r.id === "string" &&
-        typeof r.models === "object" &&
-        r.models !== null,
-    );
+    return JSON.parse(localStorage.getItem(key) ?? "null");
   } catch {
-    return [];
+    return null;
   }
 }
 
-// Storage can be full or unavailable (private browsing); history is a
-// convenience, so keep going with the in-memory list rather than throw.
-function persist(runs: SavedRun[]): SavedRun[] {
+// Storage can be full or unavailable (private browsing); the list is a
+// convenience, so keep going with the in-memory copy rather than throw.
+function persist(ids: string[]): string[] {
   try {
-    localStorage.setItem(KEY, JSON.stringify(runs));
+    localStorage.setItem(KEY, JSON.stringify(ids));
   } catch {
     // ignore
   }
-  return runs;
+  return ids;
 }
 
-export function saveRun(run: SavedRun): SavedRun[] {
-  return persist([run, ...loadRuns()].slice(0, MAX_RUNS));
+export function loadHistory(): string[] {
+  const parsed = read(KEY);
+  // Valid JSON of the wrong shape (e.g. "null") would otherwise crash the page,
+  // and one bad id would make the server reject the whole list.
+  return Array.isArray(parsed) ? parsed.filter(isUuid) : [];
 }
 
-export function deleteRun(id: string): SavedRun[] {
-  return persist(loadRuns().filter((r) => r.id !== id));
+export function addToHistory(ids: string[]): string[] {
+  return persist([...new Set([...ids, ...loadHistory()])].slice(0, MAX_HISTORY));
 }
 
-export type Transition = "pass-pass" | "fail-fail" | "fixed" | "regressed" | "ungraded";
+export function removeFromHistory(id: string): string[] {
+  return persist(loadHistory().filter((x) => x !== id));
+}
 
-export function transition(a: boolean | null, b: boolean | null): Transition {
-  if (a === null || b === null) return "ungraded";
-  if (a && b) return "pass-pass";
-  if (!a && !b) return "fail-fail";
-  return a && !b ? "regressed" : "fixed";
+// Drops ids the server no longer knows (for example after a database reset).
+export function pruneHistory(known: Set<string>): string[] {
+  return persist(loadHistory().filter((id) => known.has(id)));
+}
+
+// The raw v1 entries; the server validates them.
+export function loadLegacyRuns(): unknown[] {
+  const parsed = read(LEGACY_KEY);
+  return Array.isArray(parsed) ? parsed : [];
+}
+
+export function clearLegacyRuns(): void {
+  try {
+    localStorage.removeItem(LEGACY_KEY);
+  } catch {
+    // ignore
+  }
 }

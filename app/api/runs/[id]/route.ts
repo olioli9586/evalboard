@@ -1,6 +1,7 @@
 import { NextRequest } from "next/server";
 import { getPool } from "@/lib/db";
-import { getRun, isUuid, listResults, runSummary } from "@/lib/store";
+import { getRun, listResults, runSummary } from "@/lib/store";
+import { isUuid } from "@/lib/uuid";
 
 export const runtime = "nodejs";
 

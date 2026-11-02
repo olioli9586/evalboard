@@ -1,5 +1,5 @@
 import { MODELS, SAMPLES, type EvalCase, type GraderKind } from "./eval";
-import { isUuid } from "./store";
+import { isUuid } from "./uuid";
 
 // ---------------------------------------------------------------------------
 // The one-time import of v1 history. v1 kept each run in localStorage as a

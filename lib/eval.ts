@@ -33,6 +33,10 @@ export const PRICES: Record<string, { in: number; out: number }> = {
 
 export const MODELS = Object.keys(PRICES);
 
+// Cases per queue delivery. The worker always takes the lowest-numbered cases
+// that have no result yet, so the UI can estimate which are in progress.
+export const BATCH_SIZE = 5;
+
 export function cost(model: string, inTok: number, outTok: number): number {
   const p = PRICES[model] ?? PRICES["claude-opus-4-8"];
   return (inTok * p.in + outTok * p.out) / 1_000_000;

@@ -1,5 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { deleteRun, loadRuns, saveRun, transition, type SavedRun } from "./history";
+import {
+  addToHistory,
+  clearLegacyRuns,
+  loadHistory,
+  loadLegacyRuns,
+  MAX_HISTORY,
+  pruneHistory,
+  removeFromHistory,
+} from "./history";
 
 function fakeStorage() {
   const data = new Map<string, string>();
@@ -11,35 +19,9 @@ function fakeStorage() {
   };
 }
 
-function run(id: string, at = "2026-01-01T00:00:00.000Z"): SavedRun {
-  return {
-    id,
-    at,
-    dataset: "custom",
-    grader: "exact",
-    system: "",
-    caseKey: "[]",
-    caseCount: 0,
-    models: {},
-  };
-}
+const id = () => crypto.randomUUID();
 
-describe("transition", () => {
-  it("classifies every pass/fail pair", () => {
-    expect(transition(true, true)).toBe("pass-pass");
-    expect(transition(false, false)).toBe("fail-fail");
-    expect(transition(false, true)).toBe("fixed");
-    expect(transition(true, false)).toBe("regressed");
-  });
-
-  it("is ungraded when either side errored", () => {
-    expect(transition(null, true)).toBe("ungraded");
-    expect(transition(false, null)).toBe("ungraded");
-    expect(transition(null, null)).toBe("ungraded");
-  });
-});
-
-describe("run storage", () => {
+describe("history", () => {
   beforeEach(() => {
     vi.stubGlobal("window", {});
     vi.stubGlobal("localStorage", fakeStorage());
@@ -48,63 +30,61 @@ describe("run storage", () => {
     vi.unstubAllGlobals();
   });
 
-  it("starts empty", () => {
-    expect(loadRuns()).toEqual([]);
-  });
-
-  it("returns [] on the server", () => {
+  it("starts empty, and is empty on the server", () => {
+    expect(loadHistory()).toEqual([]);
     vi.stubGlobal("window", undefined);
-    expect(loadRuns()).toEqual([]);
+    expect(loadHistory()).toEqual([]);
   });
 
-  it("saves newest first and persists", () => {
-    saveRun(run("a"));
-    const runs = saveRun(run("b"));
-    expect(runs.map((r) => r.id)).toEqual(["b", "a"]);
-    expect(loadRuns().map((r) => r.id)).toEqual(["b", "a"]);
+  it("adds newest first, without duplicates, and persists", () => {
+    const [a, b, c] = [id(), id(), id()];
+    addToHistory([a]);
+    expect(addToHistory([b, c, a])).toEqual([b, c, a]);
+    expect(loadHistory()).toEqual([b, c, a]);
   });
 
-  it("keeps at most 20 runs", () => {
-    for (let i = 0; i < 25; i++) saveRun(run(`r${i}`));
-    const runs = loadRuns();
-    expect(runs).toHaveLength(20);
-    expect(runs[0].id).toBe("r24");
-    expect(runs.at(-1)!.id).toBe("r5");
+  it(`keeps at most ${MAX_HISTORY} ids`, () => {
+    const ids = Array.from({ length: MAX_HISTORY + 5 }, id);
+    for (const x of ids) addToHistory([x]);
+    const kept = loadHistory();
+    expect(kept).toHaveLength(MAX_HISTORY);
+    expect(kept[0]).toBe(ids.at(-1));
   });
 
-  it("deletes by id", () => {
-    saveRun(run("a"));
-    saveRun(run("b"));
-    expect(deleteRun("a").map((r) => r.id)).toEqual(["b"]);
-    expect(loadRuns().map((r) => r.id)).toEqual(["b"]);
+  it("removes one id, or every id the server doesn't know", () => {
+    const [a, b, c] = [id(), id(), id()];
+    addToHistory([a, b, c]);
+    expect(removeFromHistory(b)).toEqual([a, c]);
+    expect(pruneHistory(new Set([c]))).toEqual([c]);
   });
 
-  it("recovers from corrupt JSON", () => {
-    localStorage.setItem("evalboard-runs", "{not json");
-    expect(loadRuns()).toEqual([]);
-  });
-
-  it("ignores valid JSON that is not a list of runs", () => {
-    for (const raw of ["null", "{}", '"x"', "42"]) {
-      localStorage.setItem("evalboard-runs", raw);
-      expect(loadRuns()).toEqual([]);
-      expect(saveRun(run("a")).map((r) => r.id)).toEqual(["a"]);
+  it("ignores corrupt JSON, the wrong shape, and ids that aren't run ids", () => {
+    for (const raw of ["{not json", "null", "{}", '"x"', "42"]) {
+      localStorage.setItem("evalboard-history", raw);
+      expect(loadHistory()).toEqual([]);
     }
-  });
-
-  it("drops malformed entries but keeps good ones", () => {
-    localStorage.setItem("evalboard-runs", JSON.stringify([null, { id: 1 }, run("ok")]));
-    expect(loadRuns().map((r) => r.id)).toEqual(["ok"]);
+    const good = id();
+    localStorage.setItem("evalboard-history", JSON.stringify([good, 7, "1; drop", null]));
+    expect(loadHistory()).toEqual([good]);
   });
 
   it("still returns the updated list when storage is full", () => {
-    saveRun(run("a"));
+    const [a, b] = [id(), id()];
+    addToHistory([a]);
     const quota = vi.spyOn(localStorage, "setItem").mockImplementation(() => {
       throw new Error("QuotaExceededError");
     });
-    expect(saveRun(run("b")).map((r) => r.id)).toEqual(["b", "a"]);
-    expect(deleteRun("a").map((r) => r.id)).toEqual([]);
+    expect(addToHistory([b])).toEqual([b, a]);
     quota.mockRestore();
   });
-});
 
+  it("reads the v1 history for the import and clears it after", () => {
+    expect(loadLegacyRuns()).toEqual([]);
+    localStorage.setItem("evalboard-runs", JSON.stringify([{ id: "x" }]));
+    expect(loadLegacyRuns()).toEqual([{ id: "x" }]);
+    clearLegacyRuns();
+    expect(loadLegacyRuns()).toEqual([]);
+    localStorage.setItem("evalboard-runs", "{not json");
+    expect(loadLegacyRuns()).toEqual([]);
+  });
+});
