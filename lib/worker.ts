@@ -17,6 +17,8 @@ import { isUuid } from "./uuid";
 // cases it hadn't written yet; a duplicate delivery can't count a case twice.
 // ---------------------------------------------------------------------------
 
+// The trigger's maxDeliveries in vercel.json (12) is a backstop above this,
+// for when the worker can't reach the database to fail the run itself.
 export const MAX_DELIVERIES = 8;
 
 export interface WorkerDeps {

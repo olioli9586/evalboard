@@ -1,7 +1,7 @@
 {
   "functions": {
     "app/api/queues/eval-batch/route.ts": {
-      "experimentalTriggers": [{ "type": "queue/v2beta", "topic": "eval-batches" }]
+      "experimentalTriggers": [{ "type": "queue/v2beta", "topic": "eval-batches", "maxDeliveries": 12 }]
     }
   }
 }
