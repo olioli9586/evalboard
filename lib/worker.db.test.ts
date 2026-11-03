@@ -2,9 +2,9 @@ import { afterAll, beforeEach, describe, expect, it } from "vitest";
 import { BadRequestError, RateLimitError } from "@anthropic-ai/sdk";
 import type pg from "pg";
 import type { EvalCase } from "./eval";
-import type { BatchMessage } from "./queue";
+import { idempotencyKey, type BatchMessage } from "./queue";
 import { CaseError, type CaseRequest } from "./run-case";
-import { createRuns, getRun, runSummary, upsertDataset } from "./store";
+import { createRuns, getRun, reopenRun, runSummary, upsertDataset } from "./store";
 import { closeTestPool, freshDb } from "./test-db";
 import { MAX_DELIVERIES, processBatch, queueRetry, RetryLaterError, type WorkerDeps } from "./worker";
 
@@ -28,7 +28,7 @@ class MemoryQueue {
   private keys = new Set<string>();
   enqueue = async (msg: BatchMessage) => {
     this.sends++;
-    const key = `${msg.runId}:${msg.seq}`;
+    const key = idempotencyKey(msg);
     if (this.keys.has(key)) return;
     this.keys.add(key);
     this.pending.push({ msg, deliveryCount: 1 });
@@ -160,6 +160,36 @@ describe("processBatch", () => {
     expect(done.error).toBeNull();
     // Cases written before the crash were not paid for twice.
     for (let i = 0; i < 7; i++) expect(calls.get(CASES[i].input)).toBe(1);
+  });
+
+  it("finishes a stuck run on a restarted chain without re-running finished cases", async () => {
+    const run = await newRun();
+    const queue = new MemoryQueue();
+    const { runCase, calls } = fakeModel();
+    await queue.enqueue({ runId: run.id, seq: 0 });
+    await processBatch(deps(queue, runCase), queue.pending.shift()!.msg, 1);
+    // The message for batch 2 is lost (its deployment was deleted, say).
+    queue.pending = [];
+    expect(await resultRows(run.id)).toEqual({ rows: 5, distinct_cases: 5 });
+
+    // An admin restart begins again at seq 0 under a new chain id. Without the
+    // id in the key, the queue would drop these sends as repeats of chain one.
+    await reopenRun(db, run.id, new Date(Date.now() + 60_000));
+    const chain = crypto.randomUUID();
+    await queue.enqueue({ runId: run.id, seq: 0, chain });
+    const sent: BatchMessage[] = [];
+    const d = deps(queue, runCase, {
+      enqueue: async (msg) => {
+        sent.push(msg);
+        await queue.enqueue(msg);
+      },
+    });
+    expect(await drain(queue, d)).toBe(2); // 5 + 2: only the missing cases
+    expect(sent).toEqual([{ runId: run.id, seq: 1, chain }]);
+
+    expect(await resultRows(run.id)).toEqual({ rows: 12, distinct_cases: 12 });
+    expect((await getRun(db, run.id))!.status).toBe("succeeded");
+    expect([...calls.values()].every((n) => n === 1)).toBe(true);
   });
 
   it("writes each case once when the same batch is delivered twice at the same time", async () => {

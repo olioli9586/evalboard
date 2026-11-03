@@ -15,6 +15,7 @@ import {
   listRunsById,
   markRunning,
   pendingCases,
+  reopenRun,
   reserveCases,
   runSummary,
   spentTodayUsd,
@@ -148,6 +149,57 @@ describe("run lifecycle", () => {
     expect(await markRunning(db, run.id)).toBeNull();
     expect(await finishRun(db, run.id, "failed", "late")).toBeNull();
     expect((await getRun(db, run.id))?.status).toBe("succeeded");
+  });
+});
+
+describe("reopenRun", () => {
+  const idleSince = () => new Date(Date.now() - 15 * 60_000);
+  // Moves a run's timestamps, and its results', an hour into the past.
+  const age = async (runId: string) => {
+    await db.query(
+      "update runs set created_at = created_at - interval '1 hour', started_at = started_at - interval '1 hour' where id = $1",
+      [runId],
+    );
+    await db.query("update results set created_at = created_at - interval '1 hour' where run_id = $1", [runId]);
+  };
+
+  it("reopens a failed run and clears its error", async () => {
+    const run = await seedRun();
+    await markRunning(db, run.id);
+    await finishRun(db, run.id, "failed", "Gave up after 8 failed attempts.");
+    const reopened = await reopenRun(db, run.id, idleSince());
+    expect(reopened).toMatchObject({ status: "running", error: null, finishedAt: null });
+    expect(reopened?.resumedAt).toBeInstanceOf(Date);
+  });
+
+  it("reopens an unfinished run only once it has been idle long enough", async () => {
+    const run = await seedRun();
+    await markRunning(db, run.id);
+    const [first] = await pendingCases(db, run.id, 1);
+    await insertResult(db, run.id, first.id, graded(true));
+    expect(await reopenRun(db, run.id, idleSince())).toBeNull();
+
+    await age(run.id);
+    expect((await reopenRun(db, run.id, idleSince()))?.status).toBe("running");
+    // The resume itself counts as activity.
+    expect(await reopenRun(db, run.id, idleSince())).toBeNull();
+  });
+
+  it("never reopens a finished run", async () => {
+    const run = await seedRun();
+    await markRunning(db, run.id);
+    await finishRun(db, run.id, "succeeded");
+    await age(run.id);
+    expect(await reopenRun(db, run.id, idleSince())).toBeNull();
+    expect((await getRun(db, run.id))?.status).toBe("succeeded");
+  });
+
+  it("lets only one of two concurrent resumes through", async () => {
+    const run = await seedRun();
+    await finishRun(db, run.id, "failed", "Could not queue the run.");
+    await age(run.id); // so only the first resume's resumed_at can stop the second
+    const both = await Promise.all([reopenRun(db, run.id, idleSince()), reopenRun(db, run.id, idleSince())]);
+    expect(both.filter(Boolean)).toHaveLength(1);
   });
 });
 

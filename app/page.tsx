@@ -27,7 +27,7 @@ import {
 import type { ResultRow, Run, RunListItem, RunSummary } from "@/lib/store";
 
 // A run as it arrives over JSON: dates are strings.
-type RunJson = Omit<Run, "createdAt" | "startedAt" | "finishedAt"> & { createdAt: string };
+type RunJson = Omit<Run, "createdAt" | "startedAt" | "finishedAt" | "resumedAt"> & { createdAt: string };
 type HistoryRun = RunJson & Pick<RunListItem, "datasetName" | "summary">;
 
 interface LiveRun {

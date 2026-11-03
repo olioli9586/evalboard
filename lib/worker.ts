@@ -21,6 +21,12 @@ import { isUuid } from "./uuid";
 // for when the worker can't reach the database to fail the run itself.
 export const MAX_DELIVERIES = 8;
 
+// A run with no activity for this long has lost its chain of batches (its
+// message expired, or the deployment that sent it was deleted), and an admin
+// may restart it. The longest normal silence is a batch waiting out the 5 min
+// redelivery backoff and then running up to the 300 s function limit.
+export const STUCK_AFTER_MINUTES = 15;
+
 export interface WorkerDeps {
   db: Db;
   runCase: (req: CaseRequest) => Promise<{ result: CaseResult; attempts: number }>;
@@ -51,7 +57,9 @@ export async function processBatch(
   const { db } = deps;
   // A malformed message would fail the same way on every redelivery until it
   // expires; acknowledge it and move on.
-  if (!isUuid(msg?.runId) || !Number.isInteger(msg.seq)) return "skipped";
+  if (!isUuid(msg?.runId) || !Number.isInteger(msg.seq) || (msg.chain !== undefined && !isUuid(msg.chain))) {
+    return "skipped";
+  }
   // A late or duplicate message for a run that already finished does nothing.
   const run = await markRunning(db, msg.runId);
   if (!run) return "skipped";
@@ -116,7 +124,7 @@ export async function processBatch(
   }
   // Enqueued last: if this call dies before here, the redelivered message
   // carries the run forward instead.
-  await deps.enqueue({ runId: run.id, seq: msg.seq + 1 });
+  await deps.enqueue({ runId: run.id, seq: msg.seq + 1, ...(msg.chain && { chain: msg.chain }) });
   return "next";
 }
 
