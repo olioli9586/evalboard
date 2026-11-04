@@ -11,6 +11,7 @@ import {
   cellState,
   formatWhen,
   isFinished,
+  runLabel,
   shortModel,
   SiteHeader,
   STATUS_LABEL,
@@ -75,7 +76,8 @@ export default async function RunPage({ params }: Props) {
           <h1 className="font-display text-2xl font-semibold">{dataset?.name}</h1>
           <p className="mt-1 font-mono text-[13px] text-muted">
             {shortModel(run.model)}
-            {run.promptLabel && ` · prompt "${run.promptLabel}"`} · {run.grader === "exact" ? "exact match" : "LLM judge"} ·{" "}
+            {run.promptLabel && ` · prompt "${run.promptLabel}"`}
+            {run.effort && ` · effort ${run.effort}`} · {run.grader === "exact" ? "exact match" : "LLM judge"} ·{" "}
             {formatWhen(run.createdAt, true)} · {STATUS_LABEL[run.status]}
           </p>
 
@@ -137,8 +139,7 @@ export default async function RunPage({ params }: Props) {
                 return (
                   <li key={o.id} className="flex flex-wrap items-center gap-x-4 gap-y-1 font-mono text-[12px]">
                     <Link href={`/runs/${o.id}`} className="text-ink underline-offset-4 hover:underline">
-                      {shortModel(o.model)}
-                      {o.promptLabel && ` · ${o.promptLabel}`}
+                      {runLabel(o)}
                     </Link>
                     <span className="text-muted">{r === null ? STATUS_LABEL[o.status] : `${r}%`}</span>
                     <Link

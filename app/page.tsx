@@ -9,13 +9,14 @@ import {
   cellState,
   formatWhen,
   isFinished,
+  runLabel,
   shortModel,
   SiteHeader,
   STATUS_LABEL,
   workingOn,
 } from "@/components/ui";
 import { passRate } from "@/lib/diff";
-import { MODELS, parseCustomCases, SAMPLES, type EvalCase, type GraderKind } from "@/lib/eval";
+import { EFFORTS, MODELS, parseCustomCases, SAMPLES, type Effort, type EvalCase, type GraderKind } from "@/lib/eval";
 import {
   addToHistory,
   clearLegacyRuns,
@@ -43,7 +44,7 @@ interface Launch {
   system: string;
   grader: GraderKind;
   cases: EvalCase[];
-  runs: { id: string; model: string; promptLabel: string | null; status: Run["status"] }[];
+  runs: { id: string; model: string; promptLabel: string | null; effort: Effort | null; status: Run["status"] }[];
 }
 
 const MAX_CASES = 20; // the server's cap for public runs (MAX_PUBLIC_CASES)
@@ -75,6 +76,7 @@ export default function Home() {
   const [customText, setCustomText] = useState("");
   const [system, setSystem] = useState(SAMPLES[0].system);
   const [grader, setGrader] = useState<GraderKind>(SAMPLES[0].grader);
+  const [effort, setEffort] = useState<Effort | null>(null); // null: each model's default
   const [selectedModels, setSelectedModels] = useState<string[]>([
     "claude-haiku-5-5",
     "claude-sonnet-5-5",
@@ -193,6 +195,7 @@ export default function Home() {
           cases,
           models: selectedModels,
           prompts: [{ system }],
+          effort,
         }),
       });
       // A platform error page (e.g. a function timeout) isn't JSON.
@@ -339,7 +342,25 @@ export default function Home() {
                 <p className="mt-2 text-[12px] leading-snug text-muted">
                   {grader === "exact"
                     ? "Case-insensitive string comparison. Free and deterministic."
-                    : "Opus 4.8 compares each answer to the expected one and explains its verdict."}
+                    : "Opus 5.5 compares each answer to the expected one and explains its verdict."}
+                </p>
+              </div>
+
+              <div>
+                <Label>Effort</Label>
+                <div className="mt-2 flex flex-wrap gap-2">
+                  <Chip active={effort === null} onClick={() => setEffort(null)}>
+                    Default
+                  </Chip>
+                  {EFFORTS.map((e) => (
+                    <Chip key={e} active={effort === e} onClick={() => setEffort(e)}>
+                      {e}
+                    </Chip>
+                  ))}
+                </div>
+                <p className="mt-2 text-[12px] leading-snug text-muted">
+                  How much the model thinks before answering. More thinking costs output tokens and time. Default
+                  is each model&apos;s own level. Haiku 4.5 takes none.
                 </p>
               </div>
 
@@ -409,7 +430,7 @@ export default function Home() {
                 return (
                   <div key={r.id} className="rounded-xl border border-line bg-card p-5">
                     <div className="flex flex-wrap items-center gap-x-6 gap-y-3">
-                      <span className="w-40 font-mono text-[13px] font-medium">{shortModel(r.model)}</span>
+                      <span className="w-40 font-mono text-[13px] font-medium">{runLabel(r)}</span>
                       <span className="font-display text-3xl font-bold tabular-nums">
                         {rate === null ? "—" : `${rate}%`}
                       </span>
@@ -529,8 +550,7 @@ export default function Home() {
                     <span className="text-muted">{run.grader}</span>
                     {run.importedFrom && <span className="text-muted">imported</span>}
                     <span className="ml-auto text-muted">
-                      {shortModel(run.model)}
-                      {run.promptLabel && ` · ${run.promptLabel}`} ·{" "}
+                      {runLabel(run)} ·{" "}
                       {isFinished(run.status) && rate !== null ? `${rate}%` : STATUS_LABEL[run.status]}
                     </span>
                     <button

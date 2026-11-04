@@ -8,6 +8,7 @@ import {
   expectedText,
   formatWhen,
   isFinished,
+  runLabel,
   shortModel,
   SiteHeader,
   STATUS_LABEL,
@@ -186,8 +187,7 @@ function RunCard({ label, run, rate }: { label: string; run: Run; rate: number |
     <div className="rounded-md border border-line px-4 py-3">
       <p className="text-[12px] font-semibold text-muted">{label}</p>
       <Link href={`/runs/${run.id}`} className="mt-1 block font-mono text-[14px] font-medium underline-offset-4 hover:underline">
-        {shortModel(run.model)}
-        {run.promptLabel && ` · ${run.promptLabel}`}
+        {runLabel(run)}
       </Link>
       <p className="mt-1 font-mono text-[12px] text-muted">
         {rate === null ? "—" : `${rate}%`} · {STATUS_LABEL[run.status]} · {formatWhen(run.createdAt, true)}

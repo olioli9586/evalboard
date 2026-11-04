@@ -69,10 +69,12 @@ Browser ── POST /api/runs ──▶ one transaction: per-IP budget, dataset,
 - **Cost is a first-class metric.** Every result carries token counts and a
   dollar figure computed from a price table; the scorecard totals them. Model
   choice is an economics question, not just an accuracy question.
-- **Models run as they ship.** The 5.5 models think before answering when
-  they judge it useful (adaptive thinking at each model's default effort). The
-  thinking is billed as output and shows up in the cost, and `max_tokens` is
-  4,096 so it can't crowd out the answer.
+- **Effort is a launch setting.** The 5.5 models think before answering when
+  they judge it useful, and effort (low to max) sets how much. A launch can
+  pick one level for all its runs, or leave each model at its default; the
+  level is stored on the run and shown wherever the run is. Thinking is billed
+  as output and shows up in the cost, and `max_tokens` is 4,096 so it can't
+  crowd out the answer.
 - **Refusals are results.** A case the model declines is recorded as errored,
   with the reason. The API's refusal fallback (another model answers instead)
   is left off: it would put a different model's answer in this model's score.

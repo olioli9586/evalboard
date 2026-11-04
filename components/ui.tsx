@@ -1,6 +1,6 @@
 import Link from "next/link";
 import type { Transition } from "@/lib/diff";
-import { BATCH_SIZE } from "@/lib/eval";
+import { BATCH_SIZE, type Effort } from "@/lib/eval";
 import type { ResultRow, RunStatus } from "@/lib/store";
 
 // Pieces shared by the home page (client) and the run and diff pages
@@ -8,6 +8,12 @@ import type { ResultRow, RunStatus } from "@/lib/store";
 
 export function shortModel(model: string): string {
   return model.replace("claude-", "");
+}
+
+// The model plus what set the run apart from others on the same dataset:
+// its prompt label and its effort level.
+export function runLabel(run: { model: string; promptLabel: string | null; effort: Effort | null }): string {
+  return [shortModel(run.model), run.promptLabel, run.effort && `effort ${run.effort}`].filter(Boolean).join(" · ");
 }
 
 export function SiteHeader({ children }: { children?: React.ReactNode }) {
