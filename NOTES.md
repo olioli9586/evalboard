@@ -10,8 +10,8 @@ with what was done, what was decided and why, and the next step.
 | 1 | Schema, migrations, data-access layer, Postgres tests in CI | done |
 | 2 | `POST /api/runs`, queue worker (Vercel Queues), retry with backoff, spend caps, kill/resume test | done |
 | 3 | UI on server runs, `/runs/[id]`, `/diff`, one-time localStorage import | done |
-| 4 | Neon + Queues setup, preview deploy, 250-case Banking77 run, fault-injection resume, record numbers | done, except a run past 300 s (see Day 4) |
-| 5 | Prompt A/B, CSV upload | |
+| 4 | Neon + Queues setup, preview deploy, 250-case Banking77 run, fault-injection resume, record numbers | done (the run past 300 s landed on Day 5) |
+| 5 | Prompt A/B, CSV upload | done |
 | 6 | Hand-label 50 cases, judge kappa, README, RESULTS.md, fresh-context review, PR | |
 
 "Before" number for the resume bullet: runs were capped at 20 cases
@@ -559,4 +559,109 @@ test messages on Haiku 5.5 at high effort, the balanced pick above. At
 the measured $0.000124 per case and 1.6 s per batch of 5, that is about
 $0.38 and about 16 minutes. Then Day 5 (prompt A/B, CSV
 upload).
+
+## Day 5 (2026-11-04)
+
+**Done**
+- **The run past 300 s**, the Day 4 item left over.
+  - The admin cap went from 1,000 to 5,000 cases.
+  - The run page lists 100 cases per page, with a "Failed or errored"
+    filter, and every bubble links to the page that has its case.
+  - Bubbles are smaller above 500 cases, and their styling is one CSS class
+    instead of a utility list repeated per bubble.
+  - The page math is in `lib/paginate.ts`, with tests.
+- **Prompt A/B in the UI** (the API already took 2 prompts).
+  - Turning on A/B adds a Prompt B box, which starts as a copy of A.
+  - Each model gets an A run and a B run, labeled on the scoreboard.
+  - After the launch there is a "compare prompt A → B" link per model.
+- **CSV upload** (`lib/csv.ts`): an RFC 4180 parser, plus header detection
+  (input/question/prompt/text and expected/answer/label/output/target, any
+  case; otherwise the first two columns).
+  - It is parsed in the browser, so the server sees the same case list as
+    any launch.
+  - Files over 1 MB are refused, and the page says when only the first 20
+    rows will run.
+- A launch bigger than the whole daily budget, for example 20 cases × 2
+  models × 2 prompts = 80 against 60, now gets a 400 that names the sizes.
+  Before, it got a misleading 429 "budget reached".
+- Tests: 85 unit and 69 Postgres (+10 CSV, +3 pagination, +1 budget
+  message). Each commit verified on its own.
+- Browser check, local and with no spend (fake Anthropic server, inline
+  queue, headless Chrome):
+  - The A/B toggle, B prefilled from A, "Run 32 tests", 4 labeled runs,
+    and 2 compare links that open a diff of A and B.
+  - A bad CSV shows its error. A 25-row CSV with quoted commas shows "first
+    20 of 25 rows", runs, and is stored with source `csv` and its quotes
+    intact.
+  - The 80-case-run launch shows the new message.
+
+**The full Banking77 test split** (preview, Haiku 5.5 at effort high, the
+balanced pick from Day 4)
+
+| | |
+|---|---|
+| Cases | 3,080 (all 77 intents) |
+| Whole run | 1,055 s = 17.6 min, 3.5x the 300 s function limit |
+| Queue deliveries | 616; batch cycle median 1.54 s, longest 11.3 s |
+| Rows | 3,080 for 3,080 cases; no retries, no errors |
+| Score | 2,511 / 3,080 = 81.5% (the 250-case sample said 83.2%) |
+| Cost | $0.386 |
+| Latency | p50 0.84 s, p95 1.80 s |
+| Share page | 1.1 MB raw / 90 KB gzipped, 0.5 s (was going to be about 12 MB) |
+
+- Weakest intents: `get_physical_card` 0/40 (it never says it, likely
+  `order_physical_card` instead), `top_up_by_bank_transfer_charge` 9/40,
+  `order_physical_card` 12/40, `beneficiary_not_allowed` 13/40,
+  `topping_up_by_card` 17/40. These look like label confusions, worth a
+  look for the prompt (a natural A/B).
+- **Record for the resume bullet:** the largest run went from 20 cases in
+  one browser tab (v1) to 3,080 cases in 17.6 minutes on the server. No
+  single function ran longer than about 11 s.
+
+**Decisions and why**
+- **Paging on the server, not a client-side grid.** It is the smallest
+  change that fixes the size, and the page stays a plain server component.
+  The bubble grid is now most of what remains (about 300 KB of HTML at
+  3,080 cases, sent again in the framework's payload). A client grid fed one
+  character per case would cut the 3 s refreshes further; not needed at 90
+  KB gzipped.
+- **A "Failed or errored" filter:** in a run of thousands, the failures are
+  what you read. A bubble always opens the unfiltered page, so every
+  bubble works in either view.
+- **CSV parsed in the browser.** There is no upload endpoint, no file
+  storage, and no second validation path: the server checks the same
+  `cases` array as for pasted text. Header names are matched loosely
+  because real exports say `question,answer` or `text,label`.
+- **400 for a launch that can never fit.** A 429 means "try later", but
+  this launch would fail every day. The message says what to cut.
+- **B starts as a copy of A.** A/B is almost always "the same prompt with
+  one change". A hint says when B is still identical.
+
+**Gotchas**
+- CI's build failed once fetching Google Fonts (`Can't resolve
+  '@vercel/turbopack-next/internal/font/google/font'`). The rerun passed.
+  It is the second time; self-hosting the two fonts (`next/font/local`)
+  would remove the network dependency.
+- The headless-browser driver must wait for React to hydrate (a
+  `__reactProps` key on the Run button) before clicking. Clicks on the
+  server-rendered HTML do nothing. Also kill the previous Chrome before
+  reusing its debugging port.
+
+**Known gaps**
+- The diff page draws the full transition grid and every changed case. At
+  3,080 cases with a few hundred flips, it would want the same paging.
+- A/B is two prompts (`MAX_PROMPTS`), and public CSVs run their first 20
+  rows.
+
+**Next (Day 6):**
+- 50 hand labels for the judge's kappa (needs hand labels from the owner; prepare
+  the sheet first).
+- README and RESULTS.md: the model and effort tables and the full split.
+- Retake `docs/home.png`.
+- A fresh-context subagent review.
+- Then merge PR #2 with "Create a merge commit". At the merge:
+  - Production env: remove or update `EVALBOARD_JUDGE_MODEL`, set
+    `EVALBOARD_ADMIN_TOKEN` and `DAILY_SPEND_CAP_USD`, check
+    `DATABASE_URL`.
+  - Open a share link in a private window on production.
 

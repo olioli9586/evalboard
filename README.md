@@ -29,7 +29,12 @@ Browser ── POST /api/runs ──▶ one transaction: per-IP budget, dataset,
   generation (Haiku 4.5, Sonnet 4.6, Opus 4.8) for comparing a model with
   its successor. Up to 3 per launch.
 - **Datasets**: two built-in samples (classification with exact match; extraction
-  with LLM judge) or paste your own as `input | expected` lines.
+  with LLM judge), your own pasted as `input | expected` lines, or a CSV file
+  (an `input`/`expected` header, `question`/`answer`, or the first two
+  columns; quoted fields with commas and line breaks work).
+- **Prompt A/B**: run a second system prompt on the same cases. Each model
+  gets an A run and a B run, and the results link straight to the A → B
+  comparison.
 - **The readout**: per-model scorecards — pass rate, one bubble per case (click to
   inspect), average latency, total cost. Runs live on the server, so closing the
   tab doesn't stop them.
@@ -158,6 +163,6 @@ Next.js 16 (App Router) · TypeScript · Tailwind CSS · Anthropic SDK · Postgr
 ## Roadmap
 
 - [x] Persist runs to Postgres and diff two runs (regression view)
-- [ ] Prompt variants: A/B two system prompts on the same dataset
-- [ ] CSV dataset upload
+- [x] Prompt variants: A/B two system prompts on the same dataset
+- [x] CSV dataset upload
 - [ ] Statistical significance hints for small datasets
