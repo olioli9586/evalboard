@@ -1,5 +1,5 @@
 import Anthropic, { NotFoundError } from "@anthropic-ai/sdk";
-import { cost, exactMatch, type CaseResult, type GraderKind } from "./eval";
+import { cost, exactMatch, type CaseResult, type Effort, type GraderKind } from "./eval";
 import { isRetryable, NO_RETRY, retryAfterMs, withRetry, type RetryOptions } from "./retry";
 
 // ---------------------------------------------------------------------------
@@ -21,6 +21,7 @@ export interface CaseRequest {
   input: string;
   expected: string;
   grader: GraderKind;
+  effort?: Effort | null; // unset: the model's default
 }
 
 // Why a case could not be scored. Retryable causes (429, 5xx, a dropped
@@ -62,7 +63,7 @@ export async function runCase(
   let latency_ms = 0;
   const complete = async (model: string) => {
     const started = Date.now();
-    const response = await createCompletion(client, model, req.system, req.input);
+    const response = await createCompletion(client, model, req.system, req.input, req.effort);
     latency_ms = Date.now() - started;
     return response;
   };
@@ -133,12 +134,14 @@ function createCompletion(
   model: string,
   system: string,
   input: string,
+  effort?: Effort | null,
 ): Promise<Anthropic.Message> {
   return client.messages.create({
     model,
     max_tokens: MAX_TOKENS,
     system: system || undefined,
     messages: [{ role: "user", content: input }],
+    ...(effort && { output_config: { effort } }),
   });
 }
 

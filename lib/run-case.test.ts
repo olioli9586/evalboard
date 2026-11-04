@@ -129,6 +129,14 @@ describe("runCase grading", () => {
     expect(create.mock.calls[0][0].max_tokens).toBe(4096);
   });
 
+  it("sends the run's effort level, and none when the run has none", async () => {
+    const create = vi.fn().mockResolvedValue(message("billing"));
+    await runCase(fakeClient(create), { ...req, model: "claude-opus-5-5", effort: "low" });
+    await runCase(fakeClient(create), { ...req, model: "claude-opus-5-5", effort: null });
+    expect(create.mock.calls[0][0].output_config).toEqual({ effort: "low" });
+    expect(create.mock.calls[1][0]).not.toHaveProperty("output_config");
+  });
+
   it("fails exact match on a different answer", async () => {
     const create = vi.fn().mockResolvedValueOnce(message("bug"));
     expect((await runCase(fakeClient(create), req)).result.pass).toBe(false);

@@ -96,6 +96,16 @@ describe("POST /api/runs", () => {
     ]);
   });
 
+  it("stores the launch's effort level on every run", async () => {
+    const res = await post({ ...base, models: ["claude-haiku-5-5", "claude-opus-5-5"], effort: "low" });
+    expect(res.status).toBe(201);
+    expect((await res.json()).runs.map((r: { effort: string }) => r.effort)).toEqual(["low", "low"]);
+    expect((await db.query("select effort from runs")).rows).toEqual([{ effort: "low" }, { effort: "low" }]);
+
+    const none = await post({ ...base, name: "No effort" });
+    expect((await none.json()).runs.map((r: { effort: string | null }) => r.effort)).toEqual([null, null]);
+  });
+
   it("reuses the stored dataset when the same cases come back", async () => {
     vi.stubEnv("DEMO_DAILY_CASE_LIMIT", "100");
     const a = await (await post(base)).json();

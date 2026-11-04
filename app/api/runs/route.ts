@@ -72,7 +72,7 @@ export async function POST(req: NextRequest) {
 
   const cap = dailySpendCapUsd();
   const variants = parsed.models.flatMap((model) =>
-    parsed.prompts.map((p) => ({ model, systemPrompt: p.system, promptLabel: p.label })),
+    parsed.prompts.map((p) => ({ model, systemPrompt: p.system, promptLabel: p.label, effort: parsed.effort })),
   );
 
   let db: ReturnType<typeof getPool>;
@@ -128,7 +128,7 @@ export async function POST(req: NextRequest) {
       ...(failed && { error: "Could not queue every run. Try again." }),
       groupId: runs[0].groupId,
       datasetId: created.datasetId,
-      runs: runs.map((r) => ({ id: r.id, model: r.model, promptLabel: r.promptLabel, status: r.status })),
+      runs: runs.map((r) => ({ id: r.id, model: r.model, promptLabel: r.promptLabel, effort: r.effort, status: r.status })),
     },
     { status: failed ? 502 : 201 },
   );

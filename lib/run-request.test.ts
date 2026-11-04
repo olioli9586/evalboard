@@ -40,6 +40,7 @@ describe("parseCreateRuns", () => {
         { system: "A", label: "v1" },
         { system: "B", label: undefined },
       ],
+      effort: null,
     });
   });
 
@@ -99,5 +100,16 @@ describe("parseCreateRuns", () => {
     expect(error({ ...base, prompts: [{ system: "x".repeat(4001) }] })).toMatch(/system string/);
     expect(error({ ...base, prompts: [{ system: "a", label: 1 }] })).toMatch(/labels/);
     expect(error({ ...base, prompts: [{ system: "a", label: "x".repeat(51) }] })).toMatch(/labels/);
+  });
+
+  it("takes one effort level for the launch, if every model accepts it", () => {
+    const five = { ...base, models: ["claude-haiku-5-5", "claude-opus-5-5"] };
+    expect(parseCreateRuns({ ...five, effort: "low" }, 20)).toMatchObject({ effort: "low" });
+    expect(parseCreateRuns({ ...five, effort: null }, 20)).toMatchObject({ effort: null });
+    expect(error({ ...five, effort: "extreme" })).toMatch(/effort must be one of low, medium, high, xhigh, max/);
+    expect(error({ ...five, effort: 1 })).toMatch(/effort must be/);
+    expect(error({ ...base, effort: "low" })).toMatch(/claude-haiku-4-5 doesn't take effort "low"/);
+    expect(error({ ...five, models: ["claude-sonnet-4-6"], effort: "xhigh" })).toMatch(/claude-sonnet-4-6 doesn't take effort "xhigh"/);
+    expect(parseCreateRuns({ ...five, models: ["claude-sonnet-4-6"], effort: "max" }, 20)).toMatchObject({ effort: "max" });
   });
 });

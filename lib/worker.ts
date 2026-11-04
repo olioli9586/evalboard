@@ -91,6 +91,7 @@ export async function processBatch(
           input: c.input,
           expected: c.expected,
           grader: run.grader,
+          effort: run.effort,
         });
         await insertResult(db, run.id, c.id, result, attempts);
       } catch (err) {

@@ -1,4 +1,4 @@
-import { MODELS, type EvalCase, type GraderKind } from "./eval";
+import { EFFORTS, MODELS, supportsEffort, type Effort, type EvalCase, type GraderKind } from "./eval";
 
 // ---------------------------------------------------------------------------
 // Validation for POST /api/runs. One request launches one dataset against
@@ -18,6 +18,7 @@ export interface CreateRunsRequest {
   cases: EvalCase[];
   models: string[];
   prompts: { system: string; label?: string }[];
+  effort: Effort | null; // one level for every run in the launch; null = each model's default
 }
 
 // Checked field by field: the body is untrusted, and a wrong type would
@@ -29,7 +30,7 @@ export function parseCreateRuns(
   if (typeof body !== "object" || body === null || Array.isArray(body)) {
     return { error: "Invalid JSON body." };
   }
-  const { name, source, grader, cases, models, prompts } = body as Record<string, unknown>;
+  const { name, source, grader, cases, models, prompts, effort } = body as Record<string, unknown>;
 
   if (typeof name !== "string" || !name.trim() || name.length > MAX_NAME_LENGTH) {
     return { error: `name must be 1-${MAX_NAME_LENGTH} characters.` };
@@ -84,6 +85,14 @@ export function parseCreateRuns(
     }
   }
 
+  if (effort !== undefined && effort !== null) {
+    if (!EFFORTS.includes(effort as Effort)) {
+      return { error: `effort must be one of ${EFFORTS.join(", ")}.` };
+    }
+    const unsupported = (models as string[]).find((m) => !supportsEffort(m, effort as Effort));
+    if (unsupported) return { error: `${unsupported} doesn't take effort "${effort}".` };
+  }
+
   return {
     name: name.trim(),
     source,
@@ -92,5 +101,6 @@ export function parseCreateRuns(
     cases: cases.map((c: EvalCase) => ({ input: c.input, expected: c.expected })),
     models: models as string[],
     prompts: prompts.map((p: { system: string; label?: string }) => ({ system: p.system, label: p.label })),
+    effort: (effort as Effort | null | undefined) ?? null,
   };
 }

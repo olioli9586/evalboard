@@ -13,6 +13,12 @@ export interface EvalCase {
 
 export type GraderKind = "exact" | "judge";
 
+// How hard a model thinks before answering (output_config.effort). A run
+// without one uses the model's default: medium on Haiku 5.5 and Opus 5.5,
+// high on the rest.
+export type Effort = "low" | "medium" | "high" | "xhigh" | "max";
+export const EFFORTS: Effort[] = ["low", "medium", "high", "xhigh", "max"];
+
 export interface CaseResult {
   output: string;
   pass: boolean;
@@ -40,6 +46,13 @@ export const PRICES: Record<string, { in: number; out: number }> = {
 };
 
 export const MODELS = Object.keys(PRICES);
+
+// Haiku 4.5 takes no effort level, and Sonnet 4.6 predates xhigh.
+export function supportsEffort(model: string, effort: Effort): boolean {
+  if (model === "claude-haiku-4-5") return false;
+  if (model === "claude-sonnet-4-6") return effort !== "xhigh";
+  return true;
+}
 
 // Cases per queue delivery. The worker always takes the lowest-numbered cases
 // that have no result yet, so the UI can estimate which are in progress.

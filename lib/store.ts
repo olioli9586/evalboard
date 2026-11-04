@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import type { Db } from "./db";
-import type { CaseResult, EvalCase, GraderKind } from "./eval";
+import type { CaseResult, Effort, EvalCase, GraderKind } from "./eval";
 import type { LegacyImport } from "./import";
 
 // ---------------------------------------------------------------------------
@@ -19,6 +19,7 @@ export interface Run {
   model: string;
   systemPrompt: string;
   promptLabel: string | null;
+  effort: Effort | null; // null: the model's default
   grader: GraderKind;
   status: RunStatus;
   totalCases: number;
@@ -75,7 +76,7 @@ export interface ResultRow {
 
 const RUN_COLUMNS = `
   id, dataset_id as "datasetId", group_id as "groupId", model,
-  system_prompt as "systemPrompt", prompt_label as "promptLabel", grader, status,
+  system_prompt as "systemPrompt", prompt_label as "promptLabel", effort, grader, status,
   total_cases as "totalCases", error, imported_from as "importedFrom",
   created_at as "createdAt", started_at as "startedAt", finished_at as "finishedAt",
   resumed_at as "resumedAt"`;
@@ -137,14 +138,14 @@ export async function createRuns(
     groupId: string;
     grader: GraderKind;
     totalCases: number;
-    variants: { model: string; systemPrompt: string; promptLabel?: string }[];
+    variants: { model: string; systemPrompt: string; promptLabel?: string; effort?: Effort | null }[];
   },
 ): Promise<Run[]> {
   const { rows } = await db.query<Run>(
-    `insert into runs (dataset_id, group_id, grader, total_cases, model, system_prompt, prompt_label)
-     select $1, $2, $3, $4, v.model, v.system_prompt, v.prompt_label
-     from unnest($5::text[], $6::text[], $7::text[])
-       with ordinality as v(model, system_prompt, prompt_label, n)
+    `insert into runs (dataset_id, group_id, grader, total_cases, model, system_prompt, prompt_label, effort)
+     select $1, $2, $3, $4, v.model, v.system_prompt, v.prompt_label, v.effort
+     from unnest($5::text[], $6::text[], $7::text[], $8::text[])
+       with ordinality as v(model, system_prompt, prompt_label, effort, n)
      order by v.n
      returning ${RUN_COLUMNS}`,
     [
@@ -155,6 +156,7 @@ export async function createRuns(
       args.variants.map((v) => v.model),
       args.variants.map((v) => v.systemPrompt),
       args.variants.map((v) => v.promptLabel ?? null),
+      args.variants.map((v) => v.effort ?? null),
     ],
   );
   return rows;

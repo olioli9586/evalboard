@@ -192,6 +192,23 @@ describe("processBatch", () => {
     expect([...calls.values()].every((n) => n === 1)).toBe(true);
   });
 
+  it("hands the run's effort level to every model call", async () => {
+    const ds = await upsertDataset(db, { name: "fake", source: "custom", cases: CASES.slice(0, 3) });
+    const [run] = await createRuns(db, {
+      datasetId: ds.id,
+      groupId: crypto.randomUUID(),
+      grader: "exact",
+      totalCases: 3,
+      variants: [{ model: "claude-opus-5-5", systemPrompt: "Answer.", effort: "low" }],
+    });
+    const queue = new MemoryQueue();
+    const { runCase } = fakeModel();
+    const efforts: unknown[] = [];
+    await queue.enqueue({ runId: run.id, seq: 0 });
+    await drain(queue, deps(queue, async (req) => (efforts.push(req.effort), runCase(req))));
+    expect(efforts).toEqual(["low", "low", "low"]);
+  });
+
   it("writes each case once when the same batch is delivered twice at the same time", async () => {
     const run = await newRun();
     const queue = new MemoryQueue();
