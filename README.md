@@ -54,7 +54,13 @@ Browser ── POST /api/runs ──▶ one transaction: per-IP budget, dataset,
   case twice. Each model call retries 429 / 5xx / dropped connections up to 4
   attempts (exponential backoff, full jitter, honoring `retry-after`); a batch
   that still fails goes back to the queue (15 s doubling to 5 min, given up
-  after 8 deliveries).
+  after 8 deliveries). If the instance dies mid-batch, the batch's 60 s lease
+  runs out and the queue redelivers it.
+- **Stuck runs can be restarted.** A run whose chain of batches is gone (its
+  deployment was deleted, or the message expired) shows no progress.
+  `POST /api/runs/[id]/resume` (admin token) restarts a failed run, or one
+  idle for 15 minutes, under a new chain id. Only the missing cases run; one
+  conditional `UPDATE` makes a second resume at the same time a no-op.
 - **Share ids are the access control.** Run ids are random UUIDs and there is
   no endpoint that lists everyone's runs; share pages are `noindex`.
 - **Cost is a first-class metric.** Every result carries token counts and a
@@ -100,7 +106,21 @@ pending migrations to `DATABASE_URL`.
 | `EVALBOARD_JUDGE_MODEL` | `claude-opus-4-8` | Model used by the LLM judge |
 | `DAILY_SPEND_CAP_USD` | `5` | Model + judge spend per day across everyone; checked before each batch |
 | `DEMO_DAILY_CASE_LIMIT` | `60` | Cases x runs per IP per day for public requests |
-| `EVALBOARD_ADMIN_TOKEN` | none | `Authorization: Bearer <token>` lifts the 20-case cap to 1,000 and skips the per-IP budget (the spend cap still applies) |
+| `EVALBOARD_ADMIN_TOKEN` | none | `Authorization: Bearer <token>` lifts the 20-case cap to 1,000, skips the per-IP budget (the spend cap still applies), and allows resuming stuck runs |
+
+### Banking77 run
+
+`node scripts/banking77.mts > run.json` builds a request with 250 messages
+from the [Banking77](https://huggingface.co/datasets/PolyAI/banking77) test
+split (CC BY 4.0; 77 intents, graded by exact match). The cases are fetched
+from Hugging Face, not stored here, and a fixed seed picks the same ones
+every time (`--cases`, `--seed`, `--models` change that). Send it with the
+admin token:
+
+```bash
+curl -X POST "$URL/api/runs" -H "Authorization: Bearer $EVALBOARD_ADMIN_TOKEN" \
+  -H "content-type: application/json" --data @run.json
+```
 
 ### Tests
 

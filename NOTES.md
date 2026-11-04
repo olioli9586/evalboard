@@ -10,7 +10,7 @@ with what was done, what was decided and why, and the next step.
 | 1 | Schema, migrations, data-access layer, Postgres tests in CI | done |
 | 2 | `POST /api/runs`, queue worker (Vercel Queues), retry with backoff, spend caps, kill/resume test | done |
 | 3 | UI on server runs, `/runs/[id]`, `/diff`, one-time localStorage import | done |
-| 4 | Neon + Queues setup, preview deploy, 250-case Banking77 run, fault-injection resume, record numbers | next |
+| 4 | Neon + Queues setup, preview deploy, 250-case Banking77 run, fault-injection resume, record numbers | done, except a run past 300 s (see Day 4) |
 | 5 | Prompt A/B, CSV upload | |
 | 6 | Hand-label 50 cases, judge kappa, README, RESULTS.md, fresh-context review, PR | |
 
@@ -277,3 +277,133 @@ a `/diff?a=&b=` page, and a one-time import of localStorage history (source
 - Admin re-enqueue for stuck runs, the forged-callback check, and a monthly
   limit in the Anthropic Console.
 - Open a share link in a private window, and record the numbers.
+
+## Day 4 (2026-11-03)
+
+**Done**
+- Neon (free plan, AWS us-east-1, next to the functions in iad1), created
+  through the Vercel Marketplace, so `DATABASE_URL` (pooled) and
+  `DATABASE_URL_UNPOOLED` were added to Preview and Production without
+  anyone copying a password. Migrations 001-003 applied over the direct URL;
+  a second run says "Already up to date".
+- Preview env vars, scoped to the `evalboard-v2` branch:
+  `ANTHROPIC_API_KEY` and `EVALBOARD_ADMIN_TOKEN` as secrets,
+  `DAILY_SPEND_CAP_USD=5`. The token is kept locally in `.env.admin.local`
+  (gitignored).
+- Admin resume: `POST /api/runs/[id]/resume` and migration 003
+  (`runs.resumed_at`). Messages carry an optional `chain` id, which goes
+  into the idempotency key.
+- Queue consumer: 60 s lease instead of the SDK's 300 s, and
+  `maxDeliveries: 12` on the trigger as a backstop.
+- `scripts/banking77.mts` builds the Banking77 run (seed 77, 250 of the
+  3,080 test messages, 74 of 77 intents) without storing data in the repo.
+- Tests: 69 unit and 66 Postgres (+10: reopenRun x4, restarted chain,
+  resume route x5). Planted bugs, each caught: resume ignoring
+  `resumed_at` (2 tests failed), chain id left out of the idempotency key,
+  chain id not passed on to the next batch.
+
+**Measured on the preview** (`evalboard-d4q2f48h3`, all numbers from the
+database)
+
+| Run | Score | Cost | Avg latency | Queue wait | Whole run | Batch cycle p50 / max |
+|---|---|---|---|---|---|---|
+| Smoke, Haiku, 5 cases (public, no token) | 5/5 | $0.003 | 0.64 s | 0.9 s | 1.6 s | 1 batch |
+| Haiku 4.5, 250 cases | 194/250 (77.6%) | $0.157 | 0.48 s | 1.0 s | 35 s | 0.62 / 1.96 s |
+| Sonnet 4.6, 250 cases | 205/250 (82.0%) | $0.469 | 0.80 s | 0.2 s | 53 s | 1.03 / 1.65 s |
+| Opus 4.8, 250 cases | 203/250 (81.2%) | $1.068 | 0.85 s | 0.2 s | 62 s | 1.22 / 3.34 s |
+
+- The three 250-case runs were one launch, in parallel: 750 cases in 62 s,
+  50 queue deliveries per run, no retries, no errors, no fallback model.
+- 144 of the 148 wrong answers were real intents, just the wrong one; only 4
+  weren't intent names (Haiku 3, Opus 1, Sonnet 0). So exact match isn't
+  failing answers on formatting.
+- Haiku to Sonnet on the diff page: 17 fixed, 6 regressed (matches SQL).
+- Spend recorded for the day: $1.85 of the $5 cap.
+
+**Kill and resume on the real queue**
+1. A copy of the preview (`vercel redeploy`) ran the same 250 cases on Haiku.
+2. At 80 rows I deleted that deployment (`vercel remove`). Deliveries already
+   in flight finished, writing up to 120 rows within 4 s; then nothing. The
+   run sat at `running`, 120/250, the "lost chain" case.
+3. Resume right away: 409 ("still making progress"); without the token: 401.
+4. After 15.4 min idle: 202, then a second resume right after: 409. The new
+   chain ran on the branch preview and finished the remaining 130 cases in
+   19 s.
+
+Results:
+- 250 rows for 250 cases.
+- The 120 rows written before the kill are unchanged (output, verdict,
+  timestamp, attempts, cost compared against a snapshot).
+- No row was written during the stall, and exactly 130 after the resume.
+- Score 195/250, against 194/250 for the uninterrupted Haiku run of the same
+  cases. The model isn't deterministic: the two runs agree on 241/250
+  verdicts and 234/250 outputs. "Same score" is proven with a deterministic
+  model in `worker.db.test.ts`. Here the row counts and the unchanged rows
+  show that nothing was double counted or run twice.
+
+**Other checks**
+- Forged callback: a POST to `/api/queues/eval-batch` with valid-looking
+  CloudEvent headers gets 404, even through `vercel curl`, which gets past
+  the preview login. Vercel doesn't route outside traffic to a queue
+  consumer at all, which matters because the SDK trusts the body of a
+  binary-mode callback.
+- Share page via `vercel curl`: `/runs/[id]` renders from the database with
+  the right title and `noindex`; an unknown id is a 404.
+
+**Decisions and why**
+- **Kill by deleting the deployment, not a fault-injection flag.** Vercel
+  pins a message to the deployment that sent it, and deleting a deployment
+  stops its consumers. That is a real way to lose a worker, and it needs no
+  test-only code in the worker. A crash in the middle of a batch is already
+  covered by the Postgres test. The real-queue test covers the path the test
+  can't: a chain that is gone for good, and an admin restart from a
+  different deployment.
+- **Resume rule: failed, or 15 min without activity.** The longest normal
+  silence is a 5 min redelivery wait plus a 300 s delivery. Restarting a
+  live chain wouldn't double count (insert-once), but it would pay for the
+  remaining cases twice.
+- **`resumed_at` counts as activity, and the check is one `UPDATE`.** Two
+  resumes at once: the second waits on the row lock, re-checks the
+  condition against the updated row, and matches nothing. Tested with 2
+  concurrent calls.
+- **A chain id in the idempotency key.** A restarted chain starts again at
+  seq 0. With the old `runId:seq` key, the queue would drop its messages as
+  repeats of the first chain's for 24 h, and the resume would quietly do
+  nothing (one of the planted bugs).
+- **60 s lease.** With the default 300 s, a crashed instance holds its batch
+  for up to 5 minutes. The SDK renews every 12 s while a batch runs, and a
+  batch takes 1-3 s.
+- **Migrations over the direct URL, the app over the pooled one.** The
+  migration runner holds `pg_advisory_lock` for a session, which a
+  transaction-mode pooler doesn't keep.
+- **Preview secrets are scoped to this branch**, so another branch's
+  preview gets no API key.
+
+**Not done, and why**
+- **A run "well past 300 s".** The worker is faster than planned: a batch
+  of 5 takes 0.6-1.2 s, so 250 cases take 35-62 s, and even the admin cap
+  of 1,000 cases on Haiku would be a bit over 2 min. The honest way past 300 s
+  is the full 3,080-message test split (about 7 min on Haiku, about $2,
+  which also gives a score you can compare with published Banking77
+  numbers). That needs the admin cap raised, and the run page reworked
+  first: a 250-case page is 1.0 MB of HTML (57 KB gzipped), so 3,080 cases
+  would be about 12 MB, re-sent every 3 s while the run is going. Decision
+  for next session.
+- **A share link in a private window.** Preview deployments are behind
+  Vercel Authentication, so a private window gets the Vercel login, as it
+  should. Checked on production after the merge (Day 6).
+- **The Anthropic Console monthly limit** is set by hand in the console;
+  the code can't do it.
+
+**Known gaps**
+- The models in `lib/eval.ts` (Haiku 4.5, Sonnet 4.6, Opus 4.8) still
+  work, but they are a generation behind (the Claude 5 models are out).
+  Updating the list and the price table is a small change, but it changes
+  what the numbers above mean, so do it as its own step.
+- `pg` warns that `sslmode=require` is treated as `verify-full`. That is the
+  strict setting, so nothing is wrong, but the warning shows in the logs.
+- `docs/home.png` still shows v1 (retake after the production deploy).
+
+**Next:** decide how to show a run past 300 s (see above), then Day 5
+(prompt A/B, CSV upload).
+
