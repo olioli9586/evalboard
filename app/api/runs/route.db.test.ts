@@ -152,6 +152,20 @@ describe("POST /api/runs", () => {
     expect((await post(base, { authorization: "Bearer admin-secret" })).status).toBe(201);
   });
 
+  it("tells a launch bigger than the whole daily budget what to cut", async () => {
+    // Limit 10: 2 cases x 3 models x 2 prompts = 12.
+    const res = await post({
+      ...base,
+      models: ["claude-haiku-5-5", "claude-sonnet-5-5", "claude-opus-5-5"],
+      prompts: [{ system: "A", label: "A" }, { system: "B", label: "B" }],
+    });
+    expect(res.status).toBe(400);
+    expect((await res.json()).error).toBe(
+      "This launch is 12 case runs (2 cases × 3 models × 2 prompts). The demo allows 10 a day; use fewer cases, models or prompts.",
+    );
+    expect(await count("usage_daily")).toBe(0);
+  });
+
   it("returns 401 for a wrong admin token", async () => {
     const res = await post(base, { authorization: "Bearer guess" });
     expect(res.status).toBe(401);

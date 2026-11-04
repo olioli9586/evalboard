@@ -74,6 +74,18 @@ export async function POST(req: NextRequest) {
   const variants = parsed.models.flatMap((model) =>
     parsed.prompts.map((p) => ({ model, systemPrompt: p.system, promptLabel: p.label, effort: parsed.effort })),
   );
+  // A launch bigger than the whole daily budget could never go through, so it
+  // gets told what to cut instead of "budget reached".
+  const caseRuns = parsed.cases.length * variants.length;
+  const limit = dailyCaseLimit();
+  if (!admin && caseRuns > limit) {
+    return Response.json(
+      {
+        error: `This launch is ${caseRuns} case runs (${parsed.cases.length} cases × ${parsed.models.length} models × ${parsed.prompts.length} prompts). The demo allows ${limit} a day; use fewer cases, models or prompts.`,
+      },
+      { status: 400 },
+    );
+  }
 
   let db: ReturnType<typeof getPool>;
   let created: { datasetId: string; runs: Run[] } | null;
@@ -85,7 +97,7 @@ export async function POST(req: NextRequest) {
     // Budget, dataset and runs commit together: a request over budget leaves
     // nothing behind, and a failed insert gives the budget back.
     created = await withTransaction(async (tx) => {
-      if (!admin && !(await reserveCases(tx, clientIp(req.headers), parsed.cases.length * variants.length, dailyCaseLimit()))) {
+      if (!admin && !(await reserveCases(tx, clientIp(req.headers), caseRuns, limit))) {
         return null;
       }
       const dataset = await upsertDataset(tx, { name: parsed.name, source: parsed.source, cases: parsed.cases });
