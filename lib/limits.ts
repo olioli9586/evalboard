@@ -6,7 +6,7 @@ import { createHash, timingSafeEqual } from "node:crypto";
 // ---------------------------------------------------------------------------
 
 export const MAX_PUBLIC_CASES = 20; // same cap the v1 browser runner had
-export const MAX_ADMIN_CASES = 1000;
+export const MAX_ADMIN_CASES = 5000; // room for Banking77's whole test split (3,080)
 
 // The history import makes no model calls but writes rows, so it is limited
 // too. The counters live in usage_daily under their own keys, apart from the

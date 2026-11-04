@@ -76,7 +76,7 @@ const system = [
 
 process.stdout.write(
   JSON.stringify({
-    name: `Banking77 test sample (${n} cases, seed ${seed})`,
+    name: n === rows.length ? `Banking77 test split (all ${n} cases)` : `Banking77 test sample (${n} cases, seed ${seed})`,
     source: "custom",
     grader: "exact",
     cases,

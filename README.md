@@ -118,7 +118,7 @@ pending migrations to `DATABASE_URL`.
 | `EVALBOARD_JUDGE_MODEL` | `claude-opus-5-5` | Model used by the LLM judge |
 | `DAILY_SPEND_CAP_USD` | `5` | Model + judge spend per day across everyone; checked before each batch |
 | `DEMO_DAILY_CASE_LIMIT` | `60` | Cases x runs per IP per day for public requests |
-| `EVALBOARD_ADMIN_TOKEN` | none | `Authorization: Bearer <token>` lifts the 20-case cap to 1,000, skips the per-IP budget (the spend cap still applies), and allows resuming stuck runs |
+| `EVALBOARD_ADMIN_TOKEN` | none | `Authorization: Bearer <token>` lifts the 20-case cap to 5,000, skips the per-IP budget (the spend cap still applies), and allows resuming stuck runs |
 
 ### Banking77 run
 
