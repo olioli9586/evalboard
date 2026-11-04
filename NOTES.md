@@ -404,8 +404,73 @@ Results:
   strict setting, so nothing is wrong, but the warning shows in the logs.
 - `docs/home.png` still shows v1 (retake after the production deploy).
 
+### Day 4, continued: Claude 5.5 models (same session)
+
+Oliver asked to move to the newest models because they cost less.
+
+**Done**
+- The default models are now Claude Haiku 5.5, Sonnet 5.5 and Opus 5.5. The
+  4.x models stay launchable. The 404 fallback and the judge default are now
+  `claude-opus-5-5`.
+- `max_tokens` went from 1,024 to 4,096 for both the target call and the judge.
+- A new unit test covers a thinking block before the answer. 70 unit and 66
+  Postgres tests pass.
+
+**Measured before choosing** (10 Banking77 cases per setting, called
+directly, not through the app)
+
+| Model | Default effort | Low effort |
+|---|---|---|
+| Haiku 5.5 | 9/10, $0.00009/case, no thinking | same |
+| Sonnet 5.5 | 9/10, $0.0017/case, no thinking | same |
+| Opus 5.5 | 9/10, $0.0043/case, thought on 3 of 10 | 9/10, $0.0035/case |
+
+**On the preview, same 250 cases**
+
+| | Haiku 4.5 | Haiku 5.5 |
+|---|---|---|
+| Score | 194/250 (77.6%) | 192/250 (76.8%) |
+| Cost | $0.157 | $0.023 (6.7x cheaper) |
+| Input tokens per case | 581 | 804 (new tokenizer, +38%) |
+| Output tokens per case | 9.5 | 25.7 (max 433: it sometimes thinks) |
+| Avg latency / whole run | 0.48 s / 35 s | 0.78 s / 62 s |
+
+- Diff 4.5 to 5.5: 16 fixed, 18 regressed, 216 the same. Same accuracy on
+  this task, at a seventh of the cost.
+- Smoke runs, 5 cases each: Sonnet 5.5 5/5 ($0.0018/case), Opus 5.5 5/5
+  ($0.0036/case). Both were served by the requested model.
+- Judge on Opus 5.5, checked live: the JSON verdict parses with a thinking
+  block in front of it. It failed "before Friday" against "by Friday" (it
+  reasoned that the deadline moved a day) and passed a reworded but
+  equivalent answer.
+
+**Decisions and why**
+- **Effort is left at each model's default.** The eval measures a model as
+  it ships. On this task, effort changed nothing for Haiku and Sonnet. Opus
+  at default thinks sometimes, which makes it cost the same as Opus 4.8. A
+  per-run effort setting would fit later as another variant, like prompt
+  A/B.
+- **`max_tokens` 4,096.** Thinking counts toward the cap, so 1,024 could cut
+  off the answer after a long think. 4,096 still bounds the worst case: on
+  Opus 5.5, $0.08 of output per case, so the spend cap (checked per batch of
+  5) can be overshot by about $0.41 at most.
+- **No refusal fallback.** The API can retry a declined request on another
+  model. In an eval, that would score another model's answer under this
+  model's name, so a refusal stays an errored case with its reason.
+- **The 4.x models stay** in the price table and the model list. The v1
+  import checks models against that list, and v1 history used them. They
+  also make a "4.5 vs 5.5" diff possible, like the one above.
+
+**Open**
+- `EVALBOARD_JUDGE_MODEL` is set in Production (left over from v1, value
+  hidden) and overrides the new default. Check it, or remove it, at the
+  merge (Day 6).
+- Sonnet 5.5 and Opus 5.5 on all 250 cases (about $1.35) are waiting for
+  Oliver's OK.
+
 **Next (decided 2026-11-03):** first the run past 300 s: raise the admin
 cap, make the run page work at 3,000+ cases, then run all 3,080 Banking77
-test messages on Haiku (about 7 min, about $2) and record the numbers. Then
-Day 5 (prompt A/B, CSV upload).
+test messages on Haiku 5.5. At the measured $0.000093 and 1.2 s per batch
+of 5, that is about $0.29 and about 12 minutes. Then Day 5 (prompt A/B, CSV
+upload).
 
