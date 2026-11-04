@@ -406,7 +406,7 @@ Results:
 
 ### Day 4, continued: Claude 5.5 models (same session)
 
-Oliver asked to move to the newest models because they cost less.
+Moved to the newest models because they cost less (requested this session).
 
 **Done**
 - The default models are now Claude Haiku 5.5, Sonnet 5.5 and Opus 5.5. The
@@ -465,8 +465,8 @@ directly, not through the app)
 - `EVALBOARD_JUDGE_MODEL` is set in Production (left over from v1, value
   hidden) and overrides the new default. Check it, or remove it, at the
   merge (Day 6).
-- Sonnet 5.5 and Opus 5.5 on all 250 cases (about $1.35) are waiting for
-  Oliver's OK.
+- Sonnet 5.5 and Opus 5.5 on all 250 cases (about $1.35) are waiting for an
+  OK.
 
 **Next (decided 2026-11-03):** first the run past 300 s: raise the admin
 cap, make the run page work at 3,000+ cases, then run all 3,080 Banking77
