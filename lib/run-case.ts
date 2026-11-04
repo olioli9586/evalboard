@@ -7,8 +7,13 @@ import { isRetryable, NO_RETRY, retryAfterMs, withRetry, type RetryOptions } fro
 // worker calls it once per case.
 // ---------------------------------------------------------------------------
 
-export const FALLBACK_MODEL = "claude-opus-4-8";
-const JUDGE_MODEL = process.env.EVALBOARD_JUDGE_MODEL ?? "claude-opus-4-8";
+export const FALLBACK_MODEL = "claude-opus-5-5";
+const JUDGE_MODEL = process.env.EVALBOARD_JUDGE_MODEL ?? "claude-opus-5-5";
+
+// The 5.5 models think by default (adaptive, at each model's default effort),
+// and thinking counts toward max_tokens. 4,096 leaves room for it and still
+// bounds what one case can cost.
+const MAX_TOKENS = 4096;
 
 export interface CaseRequest {
   model: string;
@@ -50,7 +55,7 @@ export async function runCase(
   const tally = { attempts: 0 };
   const call = <T>(fn: () => Promise<T>) => withRetry(fn, retry, tally);
 
-  // --- 1. Run the case on the target model (fallback to Opus 4.8 on 404) ---
+  // --- 1. Run the case on the target model (fallback to Opus 5.5 on 404) ---
   // Latency is the successful call alone: counting backoff waits would make a
   // rate-limited model look slow.
   let modelUsed = req.model;
@@ -131,7 +136,7 @@ function createCompletion(
 ): Promise<Anthropic.Message> {
   return client.messages.create({
     model,
-    max_tokens: 1024,
+    max_tokens: MAX_TOKENS,
     system: system || undefined,
     messages: [{ role: "user", content: input }],
   });
@@ -149,7 +154,7 @@ async function judge(
   const response = await call(() =>
     client.messages.create({
       model: JUDGE_MODEL,
-      max_tokens: 1024,
+      max_tokens: MAX_TOKENS,
       system:
         "You are a strict but fair evaluation judge. Decide whether a model's output is an acceptable answer, using the expected answer as the reference. Semantic equivalence passes; missing the core point, wrong facts, or ignoring the task instructions fail.",
       messages: [

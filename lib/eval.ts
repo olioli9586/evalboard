@@ -24,8 +24,16 @@ export interface CaseResult {
   model_used: string; // may differ from requested if fallback kicked in
 }
 
-// $ per million tokens (input, output)
+// $ per million tokens (input, output). Thinking is billed as output, and
+// the API's output_tokens already includes it. Haiku 5.5 costs $0.50 / $2.50
+// for prompts over 100K tokens; prompts here stay far below that (the system
+// prompt and each input are capped at 4,000 characters).
 export const PRICES: Record<string, { in: number; out: number }> = {
+  "claude-opus-5-5": { in: 4, out: 20 },
+  "claude-sonnet-5-5": { in: 2, out: 10 },
+  "claude-haiku-5-5": { in: 0.1, out: 0.5 },
+  // The previous generation stays launchable, so a run can compare a model
+  // with its successor, and v1 history (which used these) still imports.
   "claude-opus-4-8": { in: 5, out: 25 },
   "claude-sonnet-4-6": { in: 3, out: 15 },
   "claude-haiku-4-5": { in: 1, out: 5 },

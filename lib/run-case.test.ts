@@ -53,7 +53,7 @@ describe("runCase with retries", () => {
     expect(attempts).toBe(3);
     expect(result.reasoning).toBe("Same.");
     // The judge retry did not re-run the (already paid) model call.
-    expect(create.mock.calls.map((c) => c[0].model)).toEqual(["claude-haiku-4-5", "claude-opus-4-8", "claude-opus-4-8"]);
+    expect(create.mock.calls.map((c) => c[0].model)).toEqual(["claude-haiku-4-5", "claude-opus-5-5", "claude-opus-5-5"]);
   });
 
   it("marks an exhausted retryable failure as retryable, with the API's retry-after", async () => {
@@ -111,6 +111,24 @@ describe("runCase grading", () => {
     });
   });
 
+  it("reads the answer after a thinking block and leaves room for thinking", async () => {
+    // A 5.5 model thinks by default: its response can start with a thinking
+    // block (empty text unless summaries are asked for), and the thinking
+    // tokens are part of output_tokens.
+    const create = vi.fn().mockResolvedValueOnce({
+      content: [
+        { type: "thinking", thinking: "", signature: "sig" },
+        { type: "text", text: "billing" },
+      ],
+      usage: { input_tokens: 800, output_tokens: 55 },
+      stop_reason: "end_turn",
+    });
+    const { result } = await runCase(fakeClient(create), { ...req, model: "claude-opus-5-5" });
+    expect(result).toMatchObject({ output: "billing", pass: true, output_tokens: 55 });
+    expect(result.cost_usd).toBeCloseTo((800 * 4 + 55 * 20) / 1e6);
+    expect(create.mock.calls[0][0].max_tokens).toBe(4096);
+  });
+
   it("fails exact match on a different answer", async () => {
     const create = vi.fn().mockResolvedValueOnce(message("bug"));
     expect((await runCase(fakeClient(create), req)).result.pass).toBe(false);
@@ -136,9 +154,9 @@ describe("runCase grading", () => {
     });
     expect(result).toMatchObject({ pass: true, reasoning: "Same action." });
     const target = (100 * 1 + 20 * 5) / 1e6;
-    const judge = (400 * 5 + 40 * 25) / 1e6; // default judge is Opus 4.8
+    const judge = (400 * 4 + 40 * 20) / 1e6; // default judge is Opus 5.5
     expect(result.cost_usd).toBeCloseTo(target + judge);
-    expect(create.mock.calls[1][0].model).toBe("claude-opus-4-8");
+    expect(create.mock.calls[1][0].model).toBe("claude-opus-5-5");
     expect(create.mock.calls[1][0].messages[0].content).toContain("Renew the vendor contract by Friday.");
   });
 
@@ -152,14 +170,14 @@ describe("runCase grading", () => {
     expect(err.message).toMatch(/no pass\/fail value/);
   });
 
-  it("falls back to Opus 4.8 when the requested model is retired", async () => {
+  it("falls back to Opus 5.5 when the requested model is retired", async () => {
     const create = vi
       .fn()
       .mockRejectedValueOnce(new NotFoundError(404, {}, "model not found", new Headers()))
       .mockResolvedValueOnce(message("billing"));
     const { result } = await runCase(fakeClient(create), req);
-    expect(result).toMatchObject({ model_used: "claude-opus-4-8", pass: true });
-    expect(create.mock.calls[1][0].model).toBe("claude-opus-4-8");
+    expect(result).toMatchObject({ model_used: "claude-opus-5-5", pass: true });
+    expect(create.mock.calls[1][0].model).toBe("claude-opus-5-5");
   });
 
   it("reports the fallback model's own failure", async () => {
@@ -174,7 +192,7 @@ describe("runCase grading", () => {
 
   it("does not fall back from the fallback model itself", async () => {
     const create = vi.fn().mockRejectedValueOnce(new NotFoundError(404, {}, "gone", new Headers()));
-    const err = await runCase(fakeClient(create), { ...req, model: "claude-opus-4-8" }).catch((e) => e);
+    const err = await runCase(fakeClient(create), { ...req, model: "claude-opus-5-5" }).catch((e) => e);
     expect(err).toBeInstanceOf(CaseError);
     expect(create).toHaveBeenCalledTimes(1);
   });

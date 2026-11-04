@@ -76,8 +76,8 @@ export default function Home() {
   const [system, setSystem] = useState(SAMPLES[0].system);
   const [grader, setGrader] = useState<GraderKind>(SAMPLES[0].grader);
   const [selectedModels, setSelectedModels] = useState<string[]>([
-    "claude-haiku-4-5",
-    "claude-sonnet-4-6",
+    "claude-haiku-5-5",
+    "claude-sonnet-5-5",
   ]);
   const [launch, setLaunch] = useState<Launch | null>(null);
   const [live, setLive] = useState<Record<string, LiveRun>>({});

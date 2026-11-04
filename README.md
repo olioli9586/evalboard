@@ -18,13 +18,16 @@ Browser ── POST /api/runs ──▶ one transaction: per-IP budget, dataset,
    │        Vercel Queues (eval-batches) ──▶ /api/queues/eval-batch, one batch per delivery:
    │           · the next 5 cases with no result row, run concurrently
    │           · each case: target model completes it, then the grader scores it
-   │             (exact: normalized string equality · judge: Opus 4.8 verdict, strict JSON schema)
+   │             (exact: normalized string equality · judge: Opus 5.5 verdict, strict JSON schema)
    │           · each result is insert-once on (run_id, case_id)
    │           · then finish the run, or enqueue {runId, seq + 1}
    │
    └── polls GET /api/runs/[id] every 2 s ──▶ status, score, per-case results (Postgres)
 ```
 
+- **Models**: Claude Haiku 5.5, Sonnet 5.5 and Opus 5.5, plus the previous
+  generation (Haiku 4.5, Sonnet 4.6, Opus 4.8) for comparing a model with
+  its successor. Up to 3 per launch.
 - **Datasets**: two built-in samples (classification with exact match; extraction
   with LLM judge) or paste your own as `input | expected` lines.
 - **The readout**: per-model scorecards — pass rate, one bubble per case (click to
@@ -66,8 +69,15 @@ Browser ── POST /api/runs ──▶ one transaction: per-IP budget, dataset,
 - **Cost is a first-class metric.** Every result carries token counts and a
   dollar figure computed from a price table; the scorecard totals them. Model
   choice is an economics question, not just an accuracy question.
+- **Models run as they ship.** The 5.5 models think before answering when
+  they judge it useful (adaptive thinking at each model's default effort). The
+  thinking is billed as output and shows up in the cost, and `max_tokens` is
+  4,096 so it can't crowd out the answer.
+- **Refusals are results.** A case the model declines is recorded as errored,
+  with the reason. The API's refusal fallback (another model answers instead)
+  is left off: it would put a different model's answer in this model's score.
 - **Model fallback**: if a requested model returns 404 (retired), the case
-  transparently reruns on `claude-opus-4-8` and the result records which model
+  transparently reruns on `claude-opus-5-5` and the result records which model
   actually served it.
 - **Demo guardrails**: per-IP daily case budget and a global daily spend cap,
   both in Postgres so they hold across serverless instances; case and input
@@ -103,7 +113,7 @@ pending migrations to `DATABASE_URL`.
 | `ANTHROPIC_API_KEY` | none | Required |
 | `DATABASE_URL` | none | Postgres connection string (Neon in production) |
 | `EVALBOARD_QUEUE` | Vercel Queues | `inline` runs batches in the dev server (development only) |
-| `EVALBOARD_JUDGE_MODEL` | `claude-opus-4-8` | Model used by the LLM judge |
+| `EVALBOARD_JUDGE_MODEL` | `claude-opus-5-5` | Model used by the LLM judge |
 | `DAILY_SPEND_CAP_USD` | `5` | Model + judge spend per day across everyone; checked before each batch |
 | `DEMO_DAILY_CASE_LIMIT` | `60` | Cases x runs per IP per day for public requests |
 | `EVALBOARD_ADMIN_TOKEN` | none | `Authorization: Bearer <token>` lifts the 20-case cap to 1,000, skips the per-IP budget (the spend cap still applies), and allows resuming stuck runs |

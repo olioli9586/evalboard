@@ -17,7 +17,7 @@ const { values } = parseArgs({
   options: {
     cases: { type: "string", default: "250" },
     seed: { type: "string", default: "77" },
-    models: { type: "string", default: "claude-haiku-4-5,claude-sonnet-4-6,claude-opus-4-8" },
+    models: { type: "string", default: "claude-haiku-5-5,claude-sonnet-5-5,claude-opus-5-5" },
   },
 });
 const n = Number(values.cases);
