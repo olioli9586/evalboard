@@ -38,6 +38,18 @@ body {
   font-family: var(--font-body), sans-serif;
 }
 
+/* One answer bubble in a run's grid. A plain class rather than a list of
+   utilities, because a big run draws thousands of them. */
+.bubble {
+  border-radius: 9999px;
+}
+.bubble:hover {
+  opacity: 0.8;
+}
+.bubble:focus-visible {
+  outline: 2px solid var(--board);
+}
+
 @media (prefers-reduced-motion: no-preference) {
   .cell-pop {
     animation: cell-pop 0.25s ease-out both;

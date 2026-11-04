@@ -19,13 +19,22 @@ import {
 } from "@/components/ui";
 import { getPool } from "@/lib/db";
 import { passRate } from "@/lib/diff";
+import { paginate } from "@/lib/paginate";
 import { getDataset, getRun, listCases, listGroupRuns, listResults, runSummary } from "@/lib/store";
 import { isUuid } from "@/lib/uuid";
 
 // The share page for one run, read straight from the database. Anyone with
 // the link can open it; the random id is what keeps it private.
 
-type Props = { params: Promise<{ id: string }> };
+type Props = {
+  params: Promise<{ id: string }>;
+  searchParams: Promise<{ page?: string; show?: string }>;
+};
+
+// Cases listed per page. The bubbles cover the whole run, but listing every
+// case's details made a 3,080-case run's page about 12 MB, sent again on each
+// refresh while it runs.
+const CASES_PER_PAGE = 100;
 
 // cache() lets the page and its metadata share one set of queries.
 const loadRun = cache(async (id: string) => {
@@ -53,13 +62,28 @@ export async function generateMetadata({ params }: Props): Promise<Metadata> {
   };
 }
 
-export default async function RunPage({ params }: Props) {
+export default async function RunPage({ params, searchParams }: Props) {
   const data = await loadRun((await params).id);
   if (!data) notFound();
   const { run, dataset, cases, results, summary, others } = data;
   const byPosition = new Map(results.map((r) => [r.position, r]));
   const working = workingOn(cases.length, byPosition, run.status);
   const rate = passRate(summary);
+
+  // The list shows one page of all cases, or of the failed and errored ones.
+  const query = await searchParams;
+  const failedOnly = query.show === "failed";
+  const failed = cases.filter((c) => {
+    const r = byPosition.get(c.position);
+    return r !== undefined && r.pass !== true;
+  });
+  const listed = failedOnly ? failed : cases;
+  const { page, pages, start, items: shown } = paginate(listed, query.page, CASES_PER_PAGE);
+  // A bubble opens its case on the unfiltered page that lists it.
+  const paged = failedOnly || cases.length > CASES_PER_PAGE;
+  const caseHref = (position: number) =>
+    `${paged ? `?page=${Math.floor(position / CASES_PER_PAGE) + 1}` : ""}#case-${position + 1}`;
+  const bubbleSize = cases.length > 500 ? "h-3 w-3" : "h-5 w-5";
 
   return (
     <main className="min-h-screen">
@@ -114,9 +138,9 @@ export default async function RunPage({ params }: Props) {
               return (
                 <a
                   key={c.position}
-                  href={`#case-${c.position + 1}`}
+                  href={caseHref(c.position)}
                   title={`case ${c.position + 1}: ${CELL_LABEL[state]}`}
-                  className={`h-5 w-5 rounded-full hover:opacity-80 focus-visible:outline focus-visible:outline-2 focus-visible:outline-board ${CELL_CLASS[state]}`}
+                  className={`bubble ${bubbleSize} ${CELL_CLASS[state]}`}
                 />
               );
             })}
@@ -156,9 +180,25 @@ export default async function RunPage({ params }: Props) {
         )}
 
         <section className="mt-10">
-          <h2 className="font-display text-xl font-semibold">Cases</h2>
+          <div className="flex flex-wrap items-baseline gap-x-5 gap-y-2">
+            <h2 className="font-display text-xl font-semibold">Cases</h2>
+            <nav className="flex gap-4 text-[13px]" aria-label="Which cases">
+              <FilterLink active={!failedOnly} href={`/runs/${run.id}`}>
+                All ({cases.length})
+              </FilterLink>
+              <FilterLink active={failedOnly} href={`/runs/${run.id}?show=failed`}>
+                Failed or errored ({failed.length})
+              </FilterLink>
+            </nav>
+            {listed.length > CASES_PER_PAGE && (
+              <span className="font-mono text-[12px] text-muted">
+                {start + 1}–{start + shown.length} of {listed.length}
+              </span>
+            )}
+          </div>
+          {shown.length === 0 && <p className="mt-4 text-[13px] text-muted">No failed or errored cases yet.</p>}
           <ol className="mt-4 space-y-2">
-            {cases.map((c) => {
+            {shown.map((c) => {
               const result = byPosition.get(c.position) ?? null;
               const state = cellState(result ?? undefined, working.has(c.position));
               return (
@@ -178,8 +218,36 @@ export default async function RunPage({ params }: Props) {
               );
             })}
           </ol>
+          <Pager base={`/runs/${run.id}`} page={page} pages={pages} show={failedOnly ? "failed" : undefined} />
         </section>
       </div>
     </main>
+  );
+}
+
+function FilterLink({ active, href, children }: { active: boolean; href: string; children: React.ReactNode }) {
+  return active ? (
+    <span className="font-semibold" aria-current="page">
+      {children}
+    </span>
+  ) : (
+    <Link href={href} className="font-medium text-board underline-offset-4 hover:underline">
+      {children}
+    </Link>
+  );
+}
+
+function Pager({ base, page, pages, show }: { base: string; page: number; pages: number; show?: string }) {
+  if (pages <= 1) return null;
+  const href = (p: number) => `${base}?${new URLSearchParams({ ...(show && { show }), page: String(p) })}`;
+  const step = "font-medium text-board underline-offset-4 hover:underline";
+  return (
+    <nav className="mt-5 flex items-center gap-5 text-[13px]" aria-label="Pages">
+      {page > 1 ? <Link href={href(page - 1)} className={step}>← Previous</Link> : <span className="text-muted">← Previous</span>}
+      <span className="font-mono text-[12px] text-muted">
+        Page {page} of {pages}
+      </span>
+      {page < pages ? <Link href={href(page + 1)} className={step}>Next →</Link> : <span className="text-muted">Next →</span>}
+    </nav>
   );
 }
