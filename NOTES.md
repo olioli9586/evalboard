@@ -404,6 +404,8 @@ Results:
   strict setting, so nothing is wrong, but the warning shows in the logs.
 - `docs/home.png` still shows v1 (retake after the production deploy).
 
-**Next:** decide how to show a run past 300 s (see above), then Day 5
-(prompt A/B, CSV upload).
+**Next (decided 2026-11-03):** first the run past 300 s: raise the admin
+cap, make the run page work at 3,000+ cases, then run all 3,080 Banking77
+test messages on Haiku (about 7 min, about $2) and record the numbers. Then
+Day 5 (prompt A/B, CSV upload).
 
