@@ -484,20 +484,79 @@ no retries anywhere)
   105 of 250 cases, and its run took 3.6x as long as Opus 4.8's.
 - **Format:** answers that weren't an intent name: Haiku 5.5 8, Sonnet 5.5
   4, Opus 5.5 0.
-- Spend: $1.85 recorded on 2026-11-03 (UTC) and $1.77 on 2026-11-04 (UTC,
-  this part), each under the $5 daily cap.
+- Spend: $1.85 recorded on 2026-11-03 (UTC). On 2026-11-04 (UTC), $3.22
+  including the effort sweep below. Both are under the $5 daily cap.
+
+### Day 4, continued: effort as a setting, and an effort sweep
+
+**Done**
+- Effort is a launch setting: `effort` on `POST /api/runs` (low to max, or
+  none for each model's default) applies to every run in the launch.
+  - Migration 004 adds `runs.effort`, and it is sent as
+    `output_config.effort`.
+  - A model that doesn't take the level is a 400 (Haiku 4.5 takes none,
+    Sonnet 4.6 has no xhigh).
+  - The home page has an Effort picker, and run labels show the effort
+    everywhere (scoreboard, history, run page, diff), so two runs of one
+    model can be told apart.
+- Tests: 72 unit and 68 Postgres. Two planted bugs were caught: the worker
+  not passing effort, and the insert dropping it.
+- Fixed leftover UI text: the grader hint said "Opus 4.8".
+
+**Sweep: same 250 Banking77 cases, one run per setting** (10 runs, no
+retries or errors anywhere)
+
+| Model | Effort | Score | Cost | $ per correct | p50 / p95 latency | Whole run |
+|---|---|---|---|---|---|---|
+| Haiku 4.5 | (no thinking) | 194 (77.6%) | $0.157 | $0.00081 | 0.47 / 0.53 s | 35 s |
+| Haiku 5.5 | low | 189 (75.6%) | $0.022 | $0.00012 | 0.59 / 1.12 s | 56 s |
+| Haiku 5.5 | medium (default) | 192 (76.8%) | $0.023 | $0.00012 | 0.69 / 1.15 s | 62 s |
+| **Haiku 5.5** | **high** | **208 (83.2%)** | **$0.031** | **$0.00015** | 0.79 / 1.72 s | 79 s |
+| Sonnet 4.6 | (no thinking) | 205 (82.0%) | $0.469 | $0.00229 | 0.77 / 1.01 s | 53 s |
+| Sonnet 5.5 | low | 206 (82.4%) | $0.436 | $0.00212 | 1.08 / 1.79 s | 81 s |
+| Sonnet 5.5 | high (default) | 211 (84.4%) | $0.481 | $0.00228 | 1.42 / 4.70 s | 169 s |
+| Opus 4.8 | (no thinking) | 203 (81.2%) | $1.068 | $0.00526 | 0.79 / 1.14 s | 62 s |
+| **Opus 5.5** | **low** | **225 (90.0%)** | **$0.964** | $0.00428 | 1.33 / 2.42 s | 114 s |
+| Opus 5.5 | medium (default) | 224 (89.6%) | $1.159 | $0.00517 | 2.07 / 5.36 s | 222 s |
+
+**Which differences are real** (exact McNemar test on the cases where the
+two runs disagree)
+
+| Comparison | Right only on the first / second | p |
+|---|---|---|
+| Haiku 5.5 high vs Haiku 5.5 default | 19 / 3 | 0.001 |
+| Haiku 5.5 high vs Haiku 4.5 | 22 / 8 | 0.016 |
+| Haiku 5.5 high vs Sonnet 5.5 default | 6 / 9 | 0.61 |
+| Haiku 5.5 high vs Sonnet 5.5 low | 10 / 8 | 0.82 |
+| Opus 5.5 low vs Opus 5.5 default | 3 / 2 | 1.0 |
+| Opus 5.5 low vs Haiku 5.5 high | 18 / 1 | <0.001 |
+
+**Most balanced:**
+- **Haiku 5.5 at high effort.** It matches Sonnet 5.5 (no significant
+  difference) at a fifteenth of the cost, and beats every older model. That
+  is about $0.12 per 1,000 cases at a median 0.8 s.
+- **If accuracy comes first: Opus 5.5 at low effort.** It is the only clear
+  step up (90%), and it is 17% cheaper and twice as fast as Opus at its
+  default, with no loss in accuracy.
+- **Sonnet 5.5 has no niche on this task:** Haiku high ties it for less, and
+  Opus low beats it.
+
+Caveats:
+- This is one task (77-way intent classification, exact match) and one run
+  per setting. A repeated run of the same setting moved by about 1 case
+  (Haiku 4.5: 194, then 195 in the kill test).
+- Effort's effect depends on the task, so the app default stays "each
+  model's default". The sweep is a result, not a setting.
 
 **Open**
 - `EVALBOARD_JUDGE_MODEL` is set in Production (left over from v1, value
   hidden) and overrides the new default. Check it, or remove it, at the
   merge (Day 6).
-- Effort is the lever if speed or cost matters more than the last points of
-  accuracy: Opus 5.5 at `low` didn't think on the 10-case sample. Worth a
-  measured run as a variant, not a silent default.
 
 **Next (decided 2026-11-03):** first the run past 300 s: raise the admin
 cap, make the run page work at 3,000+ cases, then run all 3,080 Banking77
-test messages on Haiku 5.5. At the measured $0.000093 and 1.2 s per batch
-of 5, that is about $0.29 and about 12 minutes. Then Day 5 (prompt A/B, CSV
+test messages on Haiku 5.5 at high effort, the balanced pick above. At
+the measured $0.000124 per case and 1.6 s per batch of 5, that is about
+$0.38 and about 16 minutes. Then Day 5 (prompt A/B, CSV
 upload).
 
