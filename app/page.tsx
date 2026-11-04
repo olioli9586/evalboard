@@ -16,6 +16,7 @@ import {
   workingOn,
 } from "@/components/ui";
 import { passRate } from "@/lib/diff";
+import { parseCsvCases } from "@/lib/csv";
 import { EFFORTS, MODELS, parseCustomCases, SAMPLES, type Effort, type EvalCase, type GraderKind } from "@/lib/eval";
 import {
   addToHistory,
@@ -41,13 +42,14 @@ interface LiveRun {
 // the scoreboard, case detail and export read from this snapshot.
 interface Launch {
   dataset: string;
-  system: string;
+  prompts: { system: string; label?: string }[];
   grader: GraderKind;
   cases: EvalCase[];
   runs: { id: string; model: string; promptLabel: string | null; effort: Effort | null; status: Run["status"] }[];
 }
 
 const MAX_CASES = 20; // the server's cap for public runs (MAX_PUBLIC_CASES)
+const MAX_CSV_BYTES = 1_000_000;
 const POLL_MS = 2000;
 
 // The v1 history moves to the server once per page load, also when React's
@@ -75,6 +77,10 @@ export default function Home() {
   const [datasetIdx, setDatasetIdx] = useState(0); // index into SAMPLES, or -1 = custom
   const [customText, setCustomText] = useState("");
   const [system, setSystem] = useState(SAMPLES[0].system);
+  const [abTest, setAbTest] = useState(false); // run a second prompt against the same cases
+  const [systemB, setSystemB] = useState("");
+  const [csv, setCsv] = useState<{ name: string; cases: EvalCase[]; total: number } | null>(null);
+  const [csvError, setCsvError] = useState("");
   const [grader, setGrader] = useState<GraderKind>(SAMPLES[0].grader);
   const [effort, setEffort] = useState<Effort | null>(null); // null: each model's default
   const [selectedModels, setSelectedModels] = useState<string[]>([
@@ -93,8 +99,10 @@ export default function Home() {
 
   const cases: EvalCase[] = useMemo(() => {
     if (datasetIdx >= 0) return SAMPLES[datasetIdx].cases;
+    if (csv) return csv.cases;
     return parseCustomCases(customText, MAX_CASES);
-  }, [datasetIdx, customText]);
+  }, [datasetIdx, customText, csv]);
+  const prompts = abTest ? [{ system, label: "A" }, { system: systemB, label: "B" }] : [{ system }];
 
   const running = launch !== null && launch.runs.some((r) => !isFinished(live[r.id]?.run.status ?? r.status));
 
@@ -183,18 +191,18 @@ export default function Home() {
     setRunError("");
     setDetail(null);
 
-    const dataset = datasetIdx >= 0 ? SAMPLES[datasetIdx].name : "Custom dataset";
+    const dataset = datasetIdx >= 0 ? SAMPLES[datasetIdx].name : (csv?.name ?? "Custom dataset");
     try {
       const res = await fetch("/api/runs", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           name: dataset,
-          source: datasetIdx >= 0 ? "sample" : "custom",
+          source: datasetIdx >= 0 ? "sample" : csv ? "csv" : "custom",
           grader,
           cases,
           models: selectedModels,
-          prompts: [{ system }],
+          prompts,
           effort,
         }),
       });
@@ -204,7 +212,7 @@ export default function Home() {
       // 502: the runs exist but some couldn't be queued; show the rest.
       if (data.error) setRunError(data.error);
       setLive({});
-      setLaunch({ dataset, system, grader, cases, runs: data.runs });
+      setLaunch({ dataset, prompts, grader, cases, runs: data.runs });
       addToHistory(data.runs.map((r: { id: string }) => r.id));
       refreshHistory();
     } catch (err) {
@@ -214,11 +222,33 @@ export default function Home() {
     }
   }
 
+  async function uploadCsv(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    e.target.value = ""; // so picking the same file again still fires
+    if (!file) return;
+    setCsvError("");
+    if (file.size > MAX_CSV_BYTES) {
+      setCsvError(`${file.name} is over 1 MB.`);
+      return;
+    }
+    const parsed = parseCsvCases(await file.text(), MAX_CASES);
+    if ("error" in parsed) {
+      setCsvError(`${file.name}: ${parsed.error}`);
+      return;
+    }
+    setCsv({ name: file.name.replace(/\.csv$/i, "").slice(0, 200), ...parsed });
+  }
+
+  function toggleAbTest(on: boolean) {
+    setAbTest(on);
+    if (on && !systemB) setSystemB(system); // B starts as a copy of A
+  }
+
   function exportJson() {
     if (!launch) return;
     const payload = {
       dataset: launch.dataset,
-      system: launch.system,
+      prompts: launch.prompts,
       grader: launch.grader,
       cases: launch.cases,
       runs: launch.runs.map((r) => live[r.id] ?? { run: r }),
@@ -281,29 +311,89 @@ export default function Home() {
                   <p className="mt-2 text-[13px] text-muted">
                     {SAMPLES[datasetIdx].description} · {cases.length} cases
                   </p>
+                ) : csv ? (
+                  <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 rounded-md border border-line px-3 py-2 text-[13px]">
+                    <span className="font-mono">{csv.name}.csv</span>
+                    <span className="text-muted">
+                      {csv.cases.length === csv.total
+                        ? `${csv.total} cases`
+                        : `first ${csv.cases.length} of ${csv.total} rows (public runs take up to ${MAX_CASES})`}
+                    </span>
+                    <button
+                      onClick={() => setCsv(null)}
+                      disabled={launching}
+                      className="ml-auto font-medium text-board underline-offset-4 hover:underline disabled:opacity-40"
+                    >
+                      Remove file
+                    </button>
+                  </div>
                 ) : (
-                  <textarea
-                    value={customText}
-                    onChange={(e) => setCustomText(e.target.value)}
-                    rows={5}
-                    placeholder={"One case per line: input | expected\nWhat is 2+2? | 4"}
-                    className="mt-2 w-full resize-y rounded-md border border-line bg-card px-3 py-2 font-mono text-[13px] outline-none focus:border-board"
-                  />
+                  <>
+                    <textarea
+                      value={customText}
+                      onChange={(e) => setCustomText(e.target.value)}
+                      rows={5}
+                      placeholder={"One case per line: input | expected\nWhat is 2+2? | 4"}
+                      className="mt-2 w-full resize-y rounded-md border border-line bg-card px-3 py-2 font-mono text-[13px] outline-none focus:border-board"
+                    />
+                    <label className="mt-1 inline-block cursor-pointer text-[13px] font-medium text-board underline-offset-4 hover:underline focus-within:underline">
+                      <input type="file" accept=".csv,text/csv" onChange={uploadCsv} className="sr-only" />
+                      Or upload a CSV
+                    </label>
+                    <span className="text-[12px] text-muted">
+                      {" "}
+                      with input and expected columns (or question and answer, or the first two columns)
+                    </span>
+                  </>
+                )}
+                {datasetIdx === -1 && csvError && (
+                  <p role="alert" className="mt-2 text-[13px] text-fail">
+                    {csvError}
+                  </p>
                 )}
               </div>
 
               <div>
-                <Label>System prompt</Label>
+                <div className="flex flex-wrap items-baseline justify-between gap-2">
+                  <Label>{abTest ? "Prompt A" : "System prompt"}</Label>
+                  <label className="flex cursor-pointer items-center gap-2 text-[12px]">
+                    <input
+                      type="checkbox"
+                      checked={abTest}
+                      disabled={launching}
+                      onChange={(e) => toggleAbTest(e.target.checked)}
+                      className="h-3.5 w-3.5 accent-[#14332c]"
+                    />
+                    A/B test a second prompt
+                  </label>
+                </div>
                 <p className="mt-1 text-[12px] text-muted">
-                  This is the prompt you&apos;re testing — edit it between runs to measure the
-                  difference.
+                  {abTest
+                    ? "Each model runs both prompts on the same cases, so A and B can be compared case by case."
+                    : "This is the prompt you\u2019re testing. Edit it between runs, or turn on A/B to test two at once."}
                 </p>
                 <textarea
                   value={system}
                   onChange={(e) => setSystem(e.target.value)}
                   rows={3}
+                  aria-label={abTest ? "Prompt A" : "System prompt"}
                   className="mt-2 w-full resize-y rounded-md border border-line bg-card px-3 py-2 font-mono text-[13px] outline-none focus:border-board"
                 />
+                {abTest && (
+                  <div className="mt-3">
+                    <Label>Prompt B</Label>
+                    <textarea
+                      value={systemB}
+                      onChange={(e) => setSystemB(e.target.value)}
+                      rows={3}
+                      aria-label="Prompt B"
+                      className="mt-2 w-full resize-y rounded-md border border-line bg-card px-3 py-2 font-mono text-[13px] outline-none focus:border-board"
+                    />
+                    {systemB === system && (
+                      <p className="mt-1 text-[12px] text-muted">B is the same as A. Change it to see the difference.</p>
+                    )}
+                  </div>
+                )}
               </div>
             </div>
 
@@ -373,7 +463,7 @@ export default function Home() {
                   ? "Starting…"
                   : running
                     ? "Running…"
-                    : `Run ${cases.length * selectedModels.length || ""} tests`}
+                    : `Run ${cases.length * selectedModels.length * prompts.length || ""} tests`}
               </button>
               <p className="text-[12px] leading-snug text-muted">
                 Runs happen on the server: you can close the tab and come back.
@@ -479,6 +569,24 @@ export default function Home() {
             <p className="mt-3 text-[12px] text-muted">
               Select a bubble to see the full input, answer, and verdict.
             </p>
+            {launch.prompts.length === 2 && (
+              <div className="mt-4 flex flex-wrap gap-x-5 gap-y-2 text-[13px]">
+                {[...new Set(launch.runs.map((r) => r.model))].map((model) => {
+                  const a = launch.runs.find((r) => r.model === model && r.promptLabel === "A");
+                  const b = launch.runs.find((r) => r.model === model && r.promptLabel === "B");
+                  if (!a || !b) return null;
+                  return (
+                    <Link
+                      key={model}
+                      href={`/diff?a=${a.id}&b=${b.id}`}
+                      className="font-medium text-board underline-offset-4 hover:underline"
+                    >
+                      {shortModel(model)}: compare prompt A → B
+                    </Link>
+                  );
+                })}
+              </div>
+            )}
           </section>
         )}
 
