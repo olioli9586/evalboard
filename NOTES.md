@@ -461,12 +461,39 @@ directly, not through the app)
   import checks models against that list, and v1 history used them. They
   also make a "4.5 vs 5.5" diff possible, like the one above.
 
+**All six models on the same 250 cases** (preview, one queue chain per run,
+no retries anywhere)
+
+| Model | Score | Cost | p50 / p95 latency | Whole run | Cases with >40 output tokens |
+|---|---|---|---|---|---|
+| Haiku 4.5 | 194 (77.6%) | $0.157 | 0.47 / 0.53 s | 35 s | 2 |
+| Haiku 5.5 | 192 (76.8%) | $0.023 | 0.69 / 1.15 s | 62 s | 25 |
+| Sonnet 4.6 | 205 (82.0%) | $0.469 | 0.77 / 1.01 s | 53 s | 0 |
+| Sonnet 5.5 | 211 (84.4%) | $0.481 | 1.42 / 4.70 s | 170 s | 33 |
+| Opus 4.8 | 203 (81.2%) | $1.068 | 0.79 / 1.14 s | 62 s | 1 |
+| Opus 5.5 | 224 (89.6%) | $1.159 | 2.07 / 5.36 s | 222 s | 105 |
+
+- **Cost:** only Haiku got cheaper (6.7x). Sonnet 5.5 cost 3% more than
+  Sonnet 4.6, and Opus 5.5 8% more than Opus 4.8. Their lower per-token
+  prices are used up by the new tokenizer (+38% input tokens) and by
+  thinking. The 10-case sample had suggested Sonnet would come out 9%
+  cheaper; at 250 cases it thought on 33 of them.
+- **Accuracy:** Opus 5.5 is the clear gain (+8.4 points, the best of all
+  six). Sonnet 5.5 gains 2.4 points. Haiku is the same.
+- **Speed:** every 5.5 model is slower, from thinking: Opus 5.5 thought on
+  105 of 250 cases, and its run took 3.6x as long as Opus 4.8's.
+- **Format:** answers that weren't an intent name: Haiku 5.5 8, Sonnet 5.5
+  4, Opus 5.5 0.
+- Spend: $1.85 recorded on 2026-11-03 (UTC) and $1.77 on 2026-11-04 (UTC,
+  this part), each under the $5 daily cap.
+
 **Open**
 - `EVALBOARD_JUDGE_MODEL` is set in Production (left over from v1, value
   hidden) and overrides the new default. Check it, or remove it, at the
   merge (Day 6).
-- Sonnet 5.5 and Opus 5.5 on all 250 cases (about $1.35) are waiting for an
-  OK.
+- Effort is the lever if speed or cost matters more than the last points of
+  accuracy: Opus 5.5 at `low` didn't think on the 10-case sample. Worth a
+  measured run as a variant, not a silent default.
 
 **Next (decided 2026-11-03):** first the run past 300 s: raise the admin
 cap, make the run page work at 3,000+ cases, then run all 3,080 Banking77
