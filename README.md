@@ -113,7 +113,12 @@ through Vercel Queues, which needs `vercel link` and `vercel env pull`.
 
 Schema lives in `db/migrations/*.sql` (plain SQL, applied in order, each in a
 transaction, checksummed in `schema_migrations`). `npm run db:migrate` applies
-pending migrations to `DATABASE_URL`.
+pending migrations to `DATABASE_URL`. Against Neon, give it the direct
+connection, `DATABASE_URL="$DATABASE_URL_UNPOOLED" npm run db:migrate`: the
+runner holds a session-level advisory lock, which the pooled URL (a
+transaction-mode pooler) doesn't keep. Migrate before deploying code that
+needs the new columns; every migration so far only adds, so older code keeps
+working on the newer schema.
 
 | Env var | Default | What it does |
 |---|---|---|
