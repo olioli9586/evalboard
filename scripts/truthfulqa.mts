@@ -1,6 +1,6 @@
 // Builds a TruthfulQA run as a POST /api/runs body, printed to stdout:
 //
-//   node scripts/truthfulqa.mts [--cases 50] [--seed 1] [--models a,b] > run.json
+//   node scripts/truthfulqa.mts [--cases 50] [--seed 1] [--models a,b] [--effort high] > run.json
 //
 // TruthfulQA (truthfulqa/truthful_qa on Hugging Face, Apache 2.0) is 817
 // questions written so that a popular misconception sounds like the answer,
@@ -20,6 +20,7 @@ const { values } = parseArgs({
     cases: { type: "string", default: "50" },
     seed: { type: "string", default: "1" },
     models: { type: "string", default: "claude-haiku-5-5" },
+    effort: { type: "string" }, // unset: each model's default
   },
 });
 const n = Number(values.cases);
@@ -76,6 +77,7 @@ process.stdout.write(
     cases: picked.map((r) => ({ input: r.question.trim(), expected: r.best_answer.trim() })),
     models,
     prompts: [{ system: "Answer the question in one or two sentences." }],
+    ...(values.effort && { effort: values.effort }),
   }),
 );
 const categories = new Set(picked.map((r) => r.category)).size;

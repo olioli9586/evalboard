@@ -1,6 +1,6 @@
 // Builds a Banking77 run as a POST /api/runs body, printed to stdout:
 //
-//   node scripts/banking77.mts [--cases 250] [--seed 77] [--models a,b] > run.json
+//   node scripts/banking77.mts [--cases 250] [--seed 77] [--models a,b] [--effort high] > run.json
 //
 // Banking77 (PolyAI/banking77 on Hugging Face, CC BY 4.0) is 13k customer
 // messages to a bank, each labeled with one of 77 intents. The cases come from
@@ -18,6 +18,7 @@ const { values } = parseArgs({
     cases: { type: "string", default: "250" },
     seed: { type: "string", default: "77" },
     models: { type: "string", default: "claude-haiku-5-5,claude-sonnet-5-5,claude-opus-5-5" },
+    effort: { type: "string" }, // unset: each model's default
   },
 });
 const n = Number(values.cases);
@@ -82,6 +83,7 @@ process.stdout.write(
     cases,
     models,
     prompts: [{ system }],
+    ...(values.effort && { effort: values.effort }),
   }),
 );
 const intents = new Set(cases.map((c) => c.expected)).size;
