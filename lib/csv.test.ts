@@ -45,6 +45,14 @@ describe("parseCsvCases", () => {
     });
   });
 
+  it("reads a header that names only one column, taking its neighbor for the other", () => {
+    const one = (csv: string) => parseCsvCases(csv, 20);
+    expect(one("prompt,completion\nHi,Hello")).toEqual({ cases: [{ input: "Hi", expected: "Hello" }], total: 1 });
+    expect(one("sentence,label\nGreat film,positive")).toEqual({ cases: [{ input: "Great film", expected: "positive" }], total: 1 });
+    expect(one("label,sentence\npositive,Great film")).toEqual({ cases: [{ input: "Great film", expected: "positive" }], total: 1 });
+    expect(one("id,question,ground_truth\n1,What is 2+2?,4")).toEqual({ cases: [{ input: "What is 2+2?", expected: "4" }], total: 1 });
+  });
+
   it("uses the first two columns when there is no header", () => {
     expect(parseCsvCases("charged twice,billing\ncrashes,bug", 20)).toMatchObject({ total: 2 });
   });
