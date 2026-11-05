@@ -72,6 +72,7 @@ export interface ResultRow {
   reasoning: string;
   modelUsed: string | null;
   attempts: number;
+  humanPass: boolean | null; // a hand label, for judge agreement; null: none
 }
 
 const RUN_COLUMNS = `
@@ -270,7 +271,7 @@ export async function listResults(db: Db, runId: string): Promise<ResultRow[]> {
     `select c.position, res.output, res.pass, res.error, res.latency_ms as "latencyMs",
        res.input_tokens as "inputTokens", res.output_tokens as "outputTokens",
        res.cost_usd::float8 as "costUsd", res.judge_reasoning as reasoning,
-       res.model_used as "modelUsed", res.attempts
+       res.model_used as "modelUsed", res.attempts, res.human_pass as "humanPass"
      from results res
      join cases c on c.id = res.case_id
      where res.run_id = $1
@@ -382,6 +383,19 @@ export async function insertResult(
       r?.model_used ?? null,
       attempts,
     ],
+  );
+  return rowCount === 1;
+}
+
+// Sets or clears (null) the hand label on one case's result. Only graded
+// results take a label: an errored case has no verdict to agree with. Returns
+// whether a result was labeled.
+export async function setHumanLabel(db: Db, runId: string, position: number, pass: boolean | null): Promise<boolean> {
+  const { rowCount } = await db.query(
+    `update results res set human_pass = $3
+     from cases c
+     where c.id = res.case_id and res.run_id = $1 and c.position = $2 and res.pass is not null`,
+    [runId, position, pass],
   );
   return rowCount === 1;
 }

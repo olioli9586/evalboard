@@ -38,6 +38,7 @@ function row(position: number, pass: boolean | null): ResultRow {
     reasoning: "",
     modelUsed: "claude-haiku-4-5",
     attempts: 1,
+    humanPass: null,
   };
 }
 

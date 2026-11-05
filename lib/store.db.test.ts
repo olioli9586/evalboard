@@ -18,6 +18,7 @@ import {
   reopenRun,
   reserveCases,
   runSummary,
+  setHumanLabel,
   spentTodayUsd,
   upsertDataset,
 } from "./store";
@@ -273,7 +274,29 @@ describe("reads for the run pages", () => {
       reasoning: "Wrong label.",
       modelUsed: "claude-haiku-4-5",
       attempts: 3,
+      humanPass: null,
     });
+  });
+
+  it("labels graded results by position, clears a label, and refuses errored or missing ones", async () => {
+    const run = await seedRun();
+    const [c0, c1] = await pendingCases(db, run.id, 2);
+    await insertResult(db, run.id, c0.id, graded(true));
+    await insertResult(db, run.id, c1.id, { error: "refused" });
+
+    expect(await setHumanLabel(db, run.id, 0, false)).toBe(true);
+    expect((await listResults(db, run.id)).map((r) => [r.position, r.pass, r.humanPass])).toEqual([
+      [0, true, false],
+      [1, null, null],
+    ]);
+    // The judge's verdict is untouched, and the score with it.
+    expect(await runSummary(db, run.id)).toMatchObject({ graded: 1, passed: 1 });
+
+    expect(await setHumanLabel(db, run.id, 0, null)).toBe(true);
+    expect((await listResults(db, run.id))[0].humanPass).toBeNull();
+    expect(await setHumanLabel(db, run.id, 1, true)).toBe(false); // errored
+    expect(await setHumanLabel(db, run.id, 2, true)).toBe(false); // no result yet
+    expect(await setHumanLabel(db, randomUUID(), 0, true)).toBe(false);
   });
 
   it("reads a dataset and its cases in order", async () => {
