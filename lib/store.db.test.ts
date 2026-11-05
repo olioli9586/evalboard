@@ -158,7 +158,8 @@ describe("reopenRun", () => {
   // Moves a run's timestamps, and its results', an hour into the past.
   const age = async (runId: string) => {
     await db.query(
-      "update runs set created_at = created_at - interval '1 hour', started_at = started_at - interval '1 hour' where id = $1",
+      `update runs set created_at = created_at - interval '1 hour', started_at = started_at - interval '1 hour',
+         last_delivery_at = last_delivery_at - interval '1 hour' where id = $1`,
       [runId],
     );
     await db.query("update results set created_at = created_at - interval '1 hour' where run_id = $1", [runId]);
@@ -184,6 +185,17 @@ describe("reopenRun", () => {
     expect((await reopenRun(db, run.id, idleSince()))?.status).toBe("running");
     // The resume itself counts as activity.
     expect(await reopenRun(db, run.id, idleSince())).toBeNull();
+  });
+
+  it("counts a delivery as activity even when its batch wrote nothing", async () => {
+    const run = await seedRun();
+    await markRunning(db, run.id);
+    await age(run.id);
+    // A chain still retrying a failing batch: deliveries, but no results.
+    await markRunning(db, run.id);
+    expect(await reopenRun(db, run.id, idleSince())).toBeNull();
+    await age(run.id);
+    expect((await reopenRun(db, run.id, idleSince()))?.status).toBe("running");
   });
 
   it("never reopens a finished run", async () => {

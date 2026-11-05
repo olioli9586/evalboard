@@ -281,11 +281,12 @@ export async function listResults(db: Db, runId: string): Promise<ResultRow[]> {
   return rows;
 }
 
-// Moves a queued run to running. started_at keeps the first start, so a
-// redelivered batch doesn't reset it. Returns null for a finished run.
+// Moves a queued run to running and stamps the delivery. started_at keeps the
+// first start, so a redelivered batch doesn't reset it. Returns null for a
+// finished run.
 export async function markRunning(db: Db, id: string): Promise<Run | null> {
   const { rows } = await db.query<Run>(
-    `update runs set status = 'running', started_at = coalesce(started_at, now())
+    `update runs set status = 'running', started_at = coalesce(started_at, now()), last_delivery_at = now()
      where id = $1 and status in ('queued', 'running')
      returning ${RUN_COLUMNS}`,
     [id],
@@ -318,16 +319,18 @@ export async function noteRunError(db: Db, id: string, error: string): Promise<v
 
 // Reopens a run whose chain of batches is gone, so a new chain can pick up
 // its missing cases: a failed run, or an unfinished one with no activity (a
-// result, the start, or an earlier resume) since idleSince. One statement,
-// and resumed_at counts as activity, so two resumes at once can't both start
-// a chain. Null when the run doesn't qualify.
+// queue delivery, a result, the start, or an earlier resume) since idleSince.
+// Deliveries count even when their batch fails, so a chain that is still
+// retrying is never taken for lost. One statement, and resumed_at counts as
+// activity, so two resumes at once can't both start a chain. Null when the
+// run doesn't qualify.
 export async function reopenRun(db: Db, id: string, idleSince: Date): Promise<Run | null> {
   const { rows } = await db.query<Run>(
     `update runs r set status = 'running', error = null, finished_at = null, resumed_at = now()
      where r.id = $1 and (
        r.status = 'failed'
        or (r.status in ('queued', 'running') and greatest(
-         r.created_at, r.started_at, r.resumed_at,
+         r.created_at, r.started_at, r.resumed_at, r.last_delivery_at,
          (select max(created_at) from results where run_id = r.id)
        ) < $2)
      )

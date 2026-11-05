@@ -341,8 +341,9 @@ describe("queueRetry", () => {
     ]);
   });
 
-  it("waits longer when the API asked for it, never shorter", () => {
-    expect(queueRetry(new RetryLaterError("x", 400), { deliveryCount: 1 })).toEqual({ afterSeconds: 400 });
+  it("waits longer when the API asked for it, never shorter, and never over 5 minutes", () => {
+    expect(queueRetry(new RetryLaterError("x", 200), { deliveryCount: 1 })).toEqual({ afterSeconds: 200 });
+    expect(queueRetry(new RetryLaterError("x", 900), { deliveryCount: 1 })).toEqual({ afterSeconds: 300 });
     expect(queueRetry(new RetryLaterError("x", 5), { deliveryCount: 3 })).toEqual({ afterSeconds: 60 });
     expect(queueRetry(new RetryLaterError("x"), { deliveryCount: 1 })).toEqual({ afterSeconds: 15 });
   });

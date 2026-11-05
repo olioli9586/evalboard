@@ -23,8 +23,9 @@ export const MAX_DELIVERIES = 8;
 
 // A run with no activity for this long has lost its chain of batches (its
 // message expired, or the deployment that sent it was deleted), and an admin
-// may restart it. The longest normal silence is a batch waiting out the 5 min
-// redelivery backoff and then running up to the 300 s function limit.
+// may restart it. Every delivery counts as activity, and the longest gap
+// between two is the 5 min retry wait (queueRetry never waits longer) plus a
+// delivery running up to the 300 s function limit.
 export const STUCK_AFTER_MINUTES = 15;
 
 export interface WorkerDeps {
@@ -130,12 +131,15 @@ export async function processBatch(
 }
 
 // The queue's backoff between redeliveries of a failed batch: 15 s doubling
-// to a 5 min ceiling, or longer if the API asked for it. That rides out a
-// short API outage; the ninth delivery, about 23 minutes after the first,
-// fails the run (see processBatch, where the database is at hand; this hook
-// is synchronous).
+// to a 5 min ceiling, or the API's retry-after when that is longer, up to the
+// same ceiling. That rides out a short API outage; the ninth delivery, about
+// 23 minutes after the first, fails the run (see processBatch, where the
+// database is at hand; this hook is synchronous). The ceiling is what lets
+// STUCK_AFTER_MINUTES tell a retrying run from a lost one.
+const MAX_RETRY_WAIT_SECONDS = 300;
+
 export function queueRetry(error: unknown, meta: { deliveryCount: number }): { afterSeconds: number } {
-  const backoff = Math.min(300, 15 * 2 ** (meta.deliveryCount - 1));
+  const backoff = 15 * 2 ** (meta.deliveryCount - 1);
   const hinted = error instanceof RetryLaterError ? (error.afterSeconds ?? 0) : 0;
-  return { afterSeconds: Math.max(backoff, hinted) };
+  return { afterSeconds: Math.min(MAX_RETRY_WAIT_SECONDS, Math.max(backoff, hinted)) };
 }
