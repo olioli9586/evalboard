@@ -1,4 +1,4 @@
-import { APIConnectionError, APIError } from "@anthropic-ai/sdk";
+import { APIConnectionError, APIConnectionTimeoutError, APIError } from "@anthropic-ai/sdk";
 
 // ---------------------------------------------------------------------------
 // Retry for a single API call: exponential backoff with full jitter on 429,
@@ -21,10 +21,14 @@ export interface RetryOptions {
 export const NO_RETRY: RetryOptions = { maxAttempts: 1, baseDelayMs: 0, maxDelayMs: 0 };
 export const WORKER_RETRY: RetryOptions = { maxAttempts: 4, baseDelayMs: 1_000, maxDelayMs: 20_000 };
 
-// Same rules as the SDK's built-in retry: an explicit x-should-retry header
-// wins, then 408, 409, 429 and any 5xx (529 "overloaded" included).
+// The SDK's rules, but for timeouts: an explicit x-should-retry header wins,
+// then 408, 409, 429 and any 5xx (529 "overloaded" included), and dropped
+// connections. A timeout is not retried: the call ran for the client's whole
+// timeout, most likely because the answer is that long, so another try would
+// take as long, cost as much, and could outlast the function.
 export function isRetryable(err: unknown): boolean {
-  if (err instanceof APIConnectionError) return true; // includes timeouts
+  if (err instanceof APIConnectionTimeoutError) return false;
+  if (err instanceof APIConnectionError) return true;
   if (!(err instanceof APIError) || err.status === undefined) return false;
   const hint = err.headers?.get("x-should-retry");
   if (hint === "true") return true;

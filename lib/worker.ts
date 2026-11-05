@@ -21,6 +21,12 @@ import { isUuid } from "./uuid";
 // for when the worker can't reach the database to fail the run itself.
 export const MAX_DELIVERIES = 8;
 
+// From this delivery of a batch on, a case that still fails with a retryable
+// error while the rest of its batch gets through is recorded as errored. It is
+// a problem with that case, not an outage, and retrying it to the end would
+// fail the whole run.
+export const ERROR_CASE_FROM_DELIVERY = 3;
+
 // A run with no activity for this long has lost its chain of batches (its
 // message expired, or the deployment that sent it was deleted), and an admin
 // may restart it. Every delivery counts as activity, and the longest gap
@@ -108,10 +114,26 @@ export async function processBatch(
     }),
   );
 
+  let failed = cases.flatMap((c, i) => {
+    const o = outcomes[i];
+    return o.status === "rejected" ? [{ c, err: o.reason as unknown }] : [];
+  });
+  // One case failing again and again while the others get through: record it
+  // as errored with its last error. When every case fails, it looks like an
+  // outage, so the batch is retried, and the run fails if it lasts.
+  if (deliveryCount >= ERROR_CASE_FROM_DELIVERY && failed.length < cases.length) {
+    for (const { c, err } of failed) {
+      if (err instanceof CaseError) {
+        await insertResult(db, run.id, c.id, { error: err.message, cost_usd: err.costUsd }, err.attempts);
+      }
+    }
+    failed = failed.filter(({ err }) => !(err instanceof CaseError));
+  }
+
   // Results that did finish are already written. Throwing without enqueuing
   // the next batch makes the queue redeliver this one, which then picks up
   // only the cases that are still missing.
-  const failures = outcomes.flatMap((o) => (o.status === "rejected" ? [o.reason as unknown] : []));
+  const failures = failed.map(({ err }) => err);
   if (failures.length > 0) {
     const first = failures[0];
     const message = `${failures.length} of ${cases.length} cases will be retried: ${first instanceof Error ? first.message : String(first)}`;

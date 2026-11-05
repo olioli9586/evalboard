@@ -6,7 +6,7 @@ import { idempotencyKey, type BatchMessage } from "./queue";
 import { CaseError, type CaseRequest } from "./run-case";
 import { createRuns, getRun, reopenRun, runSummary, upsertDataset } from "./store";
 import { closeTestPool, freshDb } from "./test-db";
-import { MAX_DELIVERIES, processBatch, queueRetry, RetryLaterError, type WorkerDeps } from "./worker";
+import { ERROR_CASE_FROM_DELIVERY, MAX_DELIVERIES, processBatch, queueRetry, RetryLaterError, type WorkerDeps } from "./worker";
 
 let db: pg.Pool;
 beforeEach(async () => {
@@ -275,6 +275,45 @@ describe("processBatch", () => {
       [run.id],
     );
     expect(rows).toEqual([{ input: "case 1" }]);
+  });
+
+  it("records a case that keeps failing while its batch gets through as errored, and finishes the run", async () => {
+    const run = await newRun();
+    const queue = new MemoryQueue();
+    const { runCase, calls } = fakeModel();
+    const stuck: WorkerDeps["runCase"] = async (req) => {
+      if (req.input === "case 1") {
+        calls.set(req.input, (calls.get(req.input) ?? 0) + 1);
+        const cause = new RateLimitError(429, {}, "rate limited", new Headers());
+        throw new CaseError(`Model call failed: ${cause.message}`, "model", 4, { cause });
+      }
+      return runCase(req);
+    };
+    await queue.enqueue({ runId: run.id, seq: 0 });
+    await drain(queue, deps(queue, stuck));
+
+    // Before, case 1 rode along in every redelivery until the run failed.
+    expect(calls.get("case 1")).toBe(ERROR_CASE_FROM_DELIVERY);
+    expect((await getRun(db, run.id))!.status).toBe("succeeded");
+    expect(await runSummary(db, run.id)).toMatchObject({ done: 12, errored: 1 });
+    const { rows } = await db.query(
+      "select r.error, r.attempts from results r join cases c on c.id = r.case_id where r.run_id = $1 and c.position = 1",
+      [run.id],
+    );
+    expect(rows).toEqual([{ error: expect.stringMatching(/^Model call failed: 429/), attempts: 4 }]);
+  });
+
+  it("keeps retrying a batch in which every case fails, as in an outage", async () => {
+    const run = await newRun();
+    const queue = new MemoryQueue();
+    const down: WorkerDeps["runCase"] = async () => {
+      const cause = new RateLimitError(429, {}, "rate limited", new Headers());
+      throw new CaseError(`Model call failed: ${cause.message}`, "model", 4, { cause });
+    };
+    await expect(processBatch(deps(queue, down), { runId: run.id, seq: 0 }, ERROR_CASE_FROM_DELIVERY)).rejects.toThrow(
+      RetryLaterError,
+    );
+    expect(await resultRows(run.id)).toEqual({ rows: 0, distinct_cases: 0 });
   });
 
   it("fails the run with the last error once the deliveries run out", async () => {

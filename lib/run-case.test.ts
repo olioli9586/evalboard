@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import type Anthropic from "@anthropic-ai/sdk";
-import { APIError, BadRequestError, NotFoundError } from "@anthropic-ai/sdk";
+import { APIConnectionTimeoutError, APIError, BadRequestError, NotFoundError } from "@anthropic-ai/sdk";
 import { CaseError, runCase, type CaseRequest } from "./run-case";
 import type { RetryOptions } from "./retry";
 
@@ -100,6 +100,13 @@ describe("runCase with retries", () => {
     expect(err).toMatchObject({ kind: "model", retryable: false });
     expect(err.message).toBe("The model used all 4096 tokens without answering.");
     expect(err.costUsd).toBeCloseTo((100 * 1 + 4096 * 5) / 1e6, 10);
+  });
+
+  it("does not retry a timed-out call", async () => {
+    const create = vi.fn().mockRejectedValue(new APIConnectionTimeoutError());
+    const err = await runCase(fakeClient(create), req, retry).catch((e) => e);
+    expect(err).toMatchObject({ kind: "model", attempts: 1, retryable: false });
+    expect(create).toHaveBeenCalledTimes(1);
   });
 });
 

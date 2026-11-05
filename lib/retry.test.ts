@@ -33,7 +33,10 @@ describe("isRetryable", () => {
   it("retries rate limits, server errors and dropped connections", () => {
     for (const status of [408, 409, 429, 500, 503, 529]) expect(isRetryable(apiError(status))).toBe(true);
     expect(isRetryable(new APIConnectionError({ message: "socket hang up" }))).toBe(true);
-    expect(isRetryable(new APIConnectionTimeoutError())).toBe(true);
+  });
+
+  it("does not retry a timeout, which would likely take as long again", () => {
+    expect(isRetryable(new APIConnectionTimeoutError())).toBe(false);
   });
 
   it("does not retry client errors or non-API errors", () => {
