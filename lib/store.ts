@@ -359,11 +359,12 @@ export async function pendingCases(db: Db, runId: string, limit: number): Promis
 
 // Idempotent: the first result written for a (run, case) wins and later
 // writes for the same pair are ignored. Returns whether this call wrote it.
+// An errored case keeps the cost of the calls that answered before it failed.
 export async function insertResult(
   db: Db,
   runId: string,
   caseId: string,
-  result: CaseResult | { error: string },
+  result: CaseResult | { error: string; cost_usd?: number },
   attempts = 1,
 ): Promise<boolean> {
   const r = "error" in result ? null : result;
@@ -381,7 +382,7 @@ export async function insertResult(
       r?.latency_ms ?? null,
       r?.input_tokens ?? 0,
       r?.output_tokens ?? 0,
-      r?.cost_usd ?? 0,
+      result.cost_usd ?? 0,
       r?.reasoning ?? "",
       r?.model_used ?? null,
       attempts,

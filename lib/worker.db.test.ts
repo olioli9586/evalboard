@@ -233,7 +233,7 @@ describe("processBatch", () => {
     const flaky: WorkerDeps["runCase"] = async (req) => {
       if (req.input === "case 2") {
         const cause = new BadRequestError(400, { message: "prompt is too long" }, undefined, new Headers());
-        throw new CaseError(`Model call failed: ${cause.message}`, "model", 1, { cause });
+        throw new CaseError(`Model call failed: ${cause.message}`, "model", 1, { cause, costUsd: 0.0004 });
       }
       return runCase(req);
     };
@@ -242,8 +242,9 @@ describe("processBatch", () => {
 
     // Case 2 would have passed, so 8 of the 11 graded cases pass.
     expect(await runSummary(db, run.id)).toMatchObject({ done: 12, graded: 11, passed: 8, errored: 1 });
-    const { rows } = await db.query("select error from results where run_id = $1 and pass is null", [run.id]);
+    const { rows } = await db.query("select error, cost_usd::float8 as cost from results where run_id = $1 and pass is null", [run.id]);
     expect(rows[0].error).toMatch(/prompt is too long/);
+    expect(rows[0].cost).toBe(0.0004); // what was paid before it failed counts toward the cap
     expect((await getRun(db, run.id))!.status).toBe("succeeded");
   });
 

@@ -251,7 +251,8 @@ describe("results", () => {
     const [c0, c1, c2] = await pendingCases(db, run.id, 3);
     await insertResult(db, run.id, c0.id, graded(true, { latency_ms: 100, cost_usd: 0.002 }));
     await insertResult(db, run.id, c1.id, graded(false, { latency_ms: 300, cost_usd: 0.001 }));
-    await insertResult(db, run.id, c2.id, { error: "upstream 529" }, 4);
+    // Errored after a paid model call: the cost still counts.
+    await insertResult(db, run.id, c2.id, { error: "Grading failed: unreadable verdict", cost_usd: 0.0005 }, 4);
 
     expect(await runSummary(db, run.id)).toEqual({
       done: 3,
@@ -259,9 +260,9 @@ describe("results", () => {
       passed: 1,
       errored: 1,
       avgLatencyMs: 200,
-      costUsd: 0.003,
+      costUsd: 0.0035,
     });
-    expect(await spentTodayUsd(db)).toBeCloseTo(0.003, 6);
+    expect(await spentTodayUsd(db)).toBeCloseTo(0.0035, 6);
   });
 });
 

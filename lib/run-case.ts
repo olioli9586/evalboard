@@ -25,18 +25,22 @@ export interface CaseRequest {
 }
 
 // Why a case could not be scored. Retryable causes (429, 5xx, a dropped
-// connection) may work later; the rest (a refusal, a 400, an unreadable
-// verdict) would fail the same way again, so the worker records the case as
-// errored and moves on.
+// connection) may work later; the rest (a refusal, a 400, a timeout, an
+// unreadable verdict) would fail the same way again, so the worker records the
+// case as errored and moves on. costUsd is what the calls that did answer cost
+// before the failure, so an errored case still counts toward the spend cap.
 export class CaseError extends Error {
+  readonly costUsd: number;
+
   constructor(
     message: string,
     readonly kind: "model" | "judge" | "refusal",
     readonly attempts: number,
-    options?: { cause?: unknown },
+    options?: { cause?: unknown; costUsd?: number },
   ) {
     super(message, options);
     this.name = "CaseError";
+    this.costUsd = options?.costUsd ?? 0;
   }
 
   get retryable(): boolean {
@@ -80,18 +84,26 @@ export async function runCase(
     throw new CaseError(`Model call failed: ${detail(err)}`, "model", tally.attempts, { cause: err });
   }
 
+  const input_tokens = response.usage.input_tokens;
+  const output_tokens = response.usage.output_tokens;
+  let cost_usd = cost(modelUsed, input_tokens, output_tokens);
+
   if (response.stop_reason === "refusal") {
-    throw new CaseError("The model declined this case.", "refusal", tally.attempts);
+    throw new CaseError("The model declined this case.", "refusal", tally.attempts, { costUsd: cost_usd });
   }
   const output = response.content
     .filter((b): b is Anthropic.TextBlock => b.type === "text")
     .map((b) => b.text)
     .join("")
     .trim();
-
-  const input_tokens = response.usage.input_tokens;
-  const output_tokens = response.usage.output_tokens;
-  let cost_usd = cost(modelUsed, input_tokens, output_tokens);
+  // Thinking counts toward max_tokens, so a long think can leave no answer.
+  // That says nothing about whether the model knew the answer: an error, not
+  // a fail.
+  if (!output && response.stop_reason === "max_tokens") {
+    throw new CaseError(`The model used all ${MAX_TOKENS} tokens without answering.`, "model", tally.attempts, {
+      costUsd: cost_usd,
+    });
+  }
 
   // --- 2. Grade ---
   let pass: boolean;
@@ -103,7 +115,10 @@ export async function runCase(
     try {
       verdict = await judge(client, { ...req, output }, call);
     } catch (err) {
-      throw new CaseError(`Grading failed: ${detail(err)}`, "judge", tally.attempts, { cause: err });
+      throw new CaseError(`Grading failed: ${detail(err)}`, "judge", tally.attempts, {
+        cause: err,
+        costUsd: cost_usd + (err instanceof VerdictError ? err.costUsd : 0),
+      });
     }
     pass = verdict.pass;
     reasoning = verdict.reasoning;
@@ -145,6 +160,17 @@ function createCompletion(
   });
 }
 
+// A judge call that answered, and was paid for, but gave no usable verdict.
+class VerdictError extends Error {
+  constructor(
+    message: string,
+    readonly costUsd: number,
+  ) {
+    super(message);
+    this.name = "VerdictError";
+  }
+}
+
 // LLM-as-judge: structured verdict via a strict JSON schema, so the grade
 // always parses. The judge sees the task (system prompt), input, expected
 // answer, and the model's output — and rules on semantic equivalence. Only the
@@ -183,6 +209,7 @@ async function judge(
     }),
   );
 
+  const cost_usd = cost(JUDGE_MODEL, response.usage.input_tokens, response.usage.output_tokens);
   const text = response.content
     .filter((b): b is Anthropic.TextBlock => b.type === "text")
     .map((b) => b.text)
@@ -192,14 +219,10 @@ async function judge(
   try {
     verdict = JSON.parse(text);
   } catch {
-    throw new Error(`The judge returned an unreadable verdict (stop reason: ${response.stop_reason}).`);
+    throw new VerdictError(`The judge returned an unreadable verdict (stop reason: ${response.stop_reason}).`, cost_usd);
   }
   if (typeof verdict?.pass !== "boolean") {
-    throw new Error("The judge's verdict had no pass/fail value.");
+    throw new VerdictError("The judge's verdict had no pass/fail value.", cost_usd);
   }
-  return {
-    pass: verdict.pass,
-    reasoning: verdict.reasoning,
-    cost_usd: cost(JUDGE_MODEL, response.usage.input_tokens, response.usage.output_tokens),
-  };
+  return { pass: verdict.pass, reasoning: verdict.reasoning, cost_usd };
 }

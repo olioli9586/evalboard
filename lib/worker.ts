@@ -70,7 +70,8 @@ export async function processBatch(
     return "finished";
   }
 
-  // Checked per batch, so the cap can be overshot by at most one batch.
+  // Checked per batch, so the cap can be overshot by one batch per run in
+  // flight at that moment.
   const spent = await spentTodayUsd(db);
   if (spent >= deps.dailyCapUsd) {
     await finishRun(db, run.id, "failed", `Daily spend cap of $${deps.dailyCapUsd} reached. Try again tomorrow.`);
@@ -99,7 +100,7 @@ export async function processBatch(
         // A failure that would repeat is the case's result; anything else
         // (rate limit after retries, outage, database error) is retried later.
         if (err instanceof CaseError && !err.retryable) {
-          await insertResult(db, run.id, c.id, { error: err.message }, err.attempts);
+          await insertResult(db, run.id, c.id, { error: err.message, cost_usd: err.costUsd }, err.attempts);
           return;
         }
         throw err;

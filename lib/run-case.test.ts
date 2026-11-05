@@ -79,12 +79,27 @@ describe("runCase with retries", () => {
     expect(err).toMatchObject({ kind: "judge", attempts: 2, retryable: false });
     expect(err.message).toMatch(/Grading failed: .*unreadable verdict.*max_tokens/);
     expect(create).toHaveBeenCalledTimes(2);
+    // Both calls answered and were paid for: Haiku 4.5, then the Opus 5.5 judge.
+    expect(err.costUsd).toBeCloseTo((100 * 1 + 10 * 5) / 1e6 + (100 * 4 + 10 * 20) / 1e6, 10);
   });
 
-  it("reports a refusal as its own kind", async () => {
+  it("reports a refusal as its own kind, with the refused call's cost", async () => {
     const create = vi.fn().mockResolvedValueOnce(message("", "refusal"));
     const err = await runCase(fakeClient(create), req, retry).catch((e) => e);
     expect(err).toMatchObject({ kind: "refusal", retryable: false });
+    expect(err.costUsd).toBeGreaterThan(0);
+  });
+
+  it("errors, rather than fails, a case where thinking used every token and left no answer", async () => {
+    const create = vi.fn().mockResolvedValueOnce({
+      content: [{ type: "thinking", thinking: "Let me think...", signature: "s" }],
+      usage: { input_tokens: 100, output_tokens: 4096 },
+      stop_reason: "max_tokens",
+    });
+    const err = await runCase(fakeClient(create), req, retry).catch((e) => e);
+    expect(err).toMatchObject({ kind: "model", retryable: false });
+    expect(err.message).toBe("The model used all 4096 tokens without answering.");
+    expect(err.costUsd).toBeCloseTo((100 * 1 + 4096 * 5) / 1e6, 10);
   });
 });
 
