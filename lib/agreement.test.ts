@@ -24,16 +24,16 @@ describe("judgeAgreement", () => {
     expect(judgeAgreement([])).toBeNull();
   });
 
-  it("gives kappa 1 for full agreement on both verdicts", () => {
+  it("gives kappa 1 for full agreement on both verdicts, with no zero-width interval", () => {
     const a = judgeAgreement([...rows(8, true, true), ...rows(2, false, false)]);
     expect(a!.kappa).toBe(1);
-    expect(a!.ci95).toEqual([1, 1]);
+    expect(a!.ci95).toBeNull();
   });
 
   it("gives kappa below 0 when the raters agree less than chance", () => {
-    const a = judgeAgreement([...rows(5, true, false), ...rows(5, false, true)]);
-    expect(a!.kappa).toBe(-1);
-    expect(a!.ci95![0]).toBe(-1);
+    const a = judgeAgreement([...rows(5, true, false), ...rows(5, false, true), ...rows(2, true, true)]);
+    expect(a!.kappa).toBeLessThan(0);
+    expect(a!.ci95![0]).toBeLessThan(a!.kappa!);
   });
 
   it("has no kappa when both raters passed every case", () => {

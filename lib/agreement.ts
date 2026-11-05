@@ -39,9 +39,11 @@ export function judgeAgreement(results: Pick<ResultRow, "pass" | "humanPass">[])
   if (chance < 1) {
     kappa = (observed - chance) / (1 - chance);
     // Cohen's (1960) large-sample standard error. At 50 labels the interval
-    // is wide, which is the point of showing it.
+    // is wide, which is the point of showing it. It is zero when the raters
+    // agreed on every case (or on none), and a zero-width interval would claim
+    // a certainty 50 labels can't give, so there is none then.
     const se = Math.sqrt((observed * (1 - observed)) / n) / (1 - chance);
-    ci95 = [Math.max(-1, kappa - 1.96 * se), Math.min(1, kappa + 1.96 * se)];
+    if (se > 0) ci95 = [Math.max(-1, kappa - 1.96 * se), Math.min(1, kappa + 1.96 * se)];
   }
   return { labeled: n, agreed: bothPass + bothFail, bothPass, bothFail, judgeOnlyPass, humanOnlyPass, kappa, ci95 };
 }
