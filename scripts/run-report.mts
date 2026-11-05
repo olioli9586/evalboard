@@ -28,7 +28,8 @@ const runs = await pool.query(
      round(coalesce(sum(res.cost_usd), 0), 4)::float8 as cost_usd,
      round((percentile_cont(0.5) within group (order by res.latency_ms) filter (where res.pass is not null))::numeric / 1000, 2)::float8 as p50_s,
      round((percentile_cont(0.95) within group (order by res.latency_ms) filter (where res.pass is not null))::numeric / 1000, 2)::float8 as p95_s,
-     count(*) filter (where res.attempts > 1)::int as retried,
+     -- attempts counts the judge call too, so a judged case without retries has 2
+     count(*) filter (where res.attempts > case when r.grader = 'judge' and res.pass is not null then 2 else 1 end)::int as retried,
      round(extract(epoch from r.finished_at - r.created_at), 1)::float8 as whole_run_s,
      r.resumed_at is not null as resumed
    from runs r
