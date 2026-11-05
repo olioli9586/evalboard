@@ -12,7 +12,7 @@ with what was done, what was decided and why, and the next step.
 | 3 | UI on server runs, `/runs/[id]`, `/diff`, one-time localStorage import | done |
 | 4 | Neon + Queues setup, preview deploy, 250-case Banking77 run, fault-injection resume, record numbers | done (the run past 300 s landed on Day 5) |
 | 5 | Prompt A/B, CSV upload | done |
-| 6 | Hand-label 50 cases, judge kappa, README, RESULTS.md, fresh-context review, PR | |
+| 6 | Hand-label 50 cases, judge kappa, README, RESULTS.md, fresh-context review, PR | done (merge waits for CI: GitHub billing lock) |
 
 "Before" number for the resume bullet: runs were capped at 20 cases
 (`MAX_CASES` in `app/page.tsx`), run from the browser.
@@ -665,3 +665,110 @@ balanced pick from Day 4)
     `DATABASE_URL`.
   - Open a share link in a private window on production.
 
+
+## Day 6 (2026-11-05)
+
+**Done**
+- **Judge vs human agreement.**
+  - Migration 005 adds `results.human_pass`, and an admin `PUT
+    /api/runs/[id]/labels` sets or clears it. Only graded cases of
+    LLM-judge runs take a label.
+  - `/runs/[id]/label` is a blind labeling page: P and F label a case, the
+    arrows move between cases, and the admin token is kept for the tab
+    only.
+    - The server component passes only input, expected answer, output and
+      your own label to the client, so the judge's verdict is not in the
+      HTML or the RSC payload either.
+    - Checked locally: no reasoning text and no `pass` key in the page.
+  - The run page gets a "Judge vs hand labels" panel and a "Judge and hand
+    label disagree" filter.
+    - The panel shows kappa, its 95% interval, raw agreement and the 2x2
+      table.
+    - Each case shows the hand label next to the judge's verdict.
+  - `lib/agreement.ts` computes Cohen's kappa with Cohen's (1960) standard
+    error. It is tested on the standard worked example (kappa 0.4).
+  - `scripts/truthfulqa.mts` picks 50 TruthfulQA questions (seed 1, 26
+    categories), graded by the judge against each reference answer.
+- **The labeled run:** Haiku 5.5 with the Opus 5.5 judge. The judge passed
+  36 of 50, for $0.28. Hand-labeled blind by
+  the owner: agreed on 47 of 50 (94%), kappa 0.85 (95% CI 0.68 to 1.00).
+  - In 1 case the judge passed and the label failed; in 2, the reverse.
+  - The judge was stricter on format and completeness: a self-correcting
+    answer past the two-sentence limit, and a list missing one country.
+  - It was more lenient when the reference was "I have no comment".
+  - Details are in RESULTS.md section 4.
+- **Fresh-context review of the whole PR:** 8 findings, 6 fixed, 2 noted
+  (table below).
+- RESULTS.md, plus `scripts/run-report.mts`, which reproduces its numbers
+  from the database. It matched NOTES exactly for the full split and the
+  McNemar test (19/3, p = 0.00086). The dataset scripts take `--effort`.
+- `docs/home.png` was retaken from a real launch (local dev server, real
+  models, local database, $0.0014).
+- Tests: 94 unit and 78 Postgres. Five planted bugs were each caught: no
+  delivery stamp, no wait cap, no cost on errors, no per-case give-up, no
+  max_tokens check.
+- Migrations 005 and 006 were applied to Neon before the pushes that need
+  them. A 5-case public smoke run on the new preview passed (5/5, delivery
+  stamp written).
+
+**Review findings and what happened**
+
+| # | Finding | Outcome |
+|---|---|---|
+| 1 | The stuck rule ignored a chain that was still retrying: no results for 15 min let a resume start a second chain (double spend), and the old chain's give-up could then fail the reopened run | Fixed: every delivery stamps `runs.last_delivery_at` (migration 006), and queue waits are capped at 5 min, so a live chain is never silent for 15 |
+| 2 | One case failing with a retryable error rode along in every redelivery until the run failed. Likely trigger: a 60 s client timeout against 4,096-token answers | Fixed: from the 3rd delivery, such a case is recorded as errored when the rest of its batch got through. Timeouts are not retried. The timeout is 120 s |
+| 3 | Errored cases were stored at $0 after paid calls, so the spend cap missed them. The overshoot is one batch per run in flight, not one batch. The per-IP budget can be multiplied with rotating IPv6 addresses | Fixed the cost; corrected the overshoot comment; IPv6 noted below (the global cap is the backstop) |
+| 4 | Migration 005 must be applied before this code serves anything; `db:migrate` uses the pooled URL | Applied before the push. The README now says to migrate over the direct URL, first. Making the script prefer `DATABASE_URL_UNPOOLED` was tried and reverted: with Neon's URL in `.env.local`, `DATABASE_URL=<local> npm run db:migrate` would migrate Neon instead |
+| 5 | A `max_tokens` stop with no text was scored a fail | Fixed: it is an errored case, with its cost |
+| 6 | A CSV header naming only one known column (`question,ground_truth`) was run as a case | Fixed: more names, and one known name is enough |
+| 7 | At full agreement the interval was 1.00 to 1.00 | Fixed: no interval when the standard error is 0 |
+| 8 | Datasets are deduplicated by content, so the first launch's name and source win | Noted. Production shares this database, where the samples are already stored under their right names |
+
+The review found no verdict leak from the label page, no SQL injection or
+XSS, and no problem with the admin token handling or the paging.
+
+**Decisions and why**
+- **The label sits on the result row, not in its own table.** There is one
+  label per (run, case), and agreement becomes a comparison of two columns.
+  Several raters would need a table of their own; this is one rater, for one
+  number.
+- **Blind by what the server sends, not by hiding things in the UI.** A
+  hidden element or a collapsed field would still be in the page.
+- **TruthfulQA for the judge, not Banking77.** Banking77 is graded by exact
+  match, so no judge is involved. TruthfulQA's free-text answers differ from
+  their reference in ways that take judgment, and a 72% pass rate gives
+  enough of both verdicts for kappa to mean something.
+- **Kappa with an interval, not raw agreement alone.** With 72% passing,
+  saying "pass" to everything would already agree 72% of the time.
+- **Timeouts are not retried.** A call that ran for the whole timeout
+  probably has a long answer, so another try costs as much and takes as
+  long. Model plus judge, at 120 s each, still fits in the 300 s function.
+- **A case gives up only when its batch-mates get through.** If every case
+  fails, it looks like an outage, and the batch is retried as before.
+
+**Gotchas**
+- **GitHub Actions is blocked.** Both jobs were refused before starting:
+  "your account is locked due to a billing issue". This needs fixing in
+  GitHub's billing settings. All checks pass locally.
+- **Splitting a commit by hunks, then `git stash pop`, conflicted** on a
+  partly staged hunk. Nothing was lost, because the stash held the whole
+  tree. Staged trees are now tested in a `git checkout-index` copy instead.
+- **The token-copy command I gave used a path relative to the wrong
+  folder**, so the first paste was not the token. The fix is an absolute
+  path.
+- **macOS cleans old files out of `/private/tmp`.** It broke the old test
+  cluster, so a new one was made.
+- **The local dev database needs migrations too.** After 006, its queue
+  failed on every delivery until it was migrated, which is the same
+  ordering rule as production.
+
+**Known gaps**
+- The diff page isn't paged (see Day 5).
+- CI's Google Fonts fetch can flake (self-host the fonts).
+- The per-IP budget is keyed on the client address, and an IPv6 user can
+  rotate through a /64. The $5 global daily cap still bounds the spend.
+- The first launch of a case list names its dataset (finding 8).
+- If the only case left in a batch keeps failing, it still fails the run
+  at delivery 9. A failed run can be resumed.
+- A significance hint in the UI is still on the roadmap. McNemar is in the
+  report script only.

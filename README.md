@@ -7,6 +7,12 @@ this is the tool I use to prove which model/prompt combination actually works.
 
 **Live demo:** https://evalboard-zeta.vercel.app (per-visitor daily case budget)
 
+**Results:** [RESULTS.md](RESULTS.md): the full 3,080-case Banking77 test
+split in 17.6 minutes through the queue, a killed and resumed run with no
+duplicate rows, six models at several effort levels with significance
+tests, and how often the LLM judge agrees with a human (kappa 0.85 on 50
+blind hand labels).
+
 ![EvalBoard](docs/home.png)
 
 ## How it works
@@ -42,6 +48,11 @@ Browser ── POST /api/runs ──▶ one transaction: per-IP budget, dataset,
   verdict, and updates itself while the run is in progress.
 - **Regression view**: `/diff?a=..&b=..` compares two runs of the same dataset
   case by case: what got fixed, what regressed, and both answers side by side.
+- **Checking the judge**: `/runs/[id]/label` lets the admin hand-label an
+  LLM-judge run case by case (P / F keys). The page never receives the judge's
+  verdicts, so they can't sway the labels. The run page then shows Cohen's
+  kappa with a 95% interval, the 2x2 table, and a filter for the cases where
+  the judge and the hand label disagree.
 - **History**: the browser keeps the ids of the runs it launched; scores come
   from the server. History saved by the first version (in localStorage) is
   moved to the server once, on first load.
@@ -130,19 +141,31 @@ working on the newer schema.
 | `DEMO_DAILY_CASE_LIMIT` | `60` | Cases x runs per IP per day for public requests |
 | `EVALBOARD_ADMIN_TOKEN` | none | `Authorization: Bearer <token>` lifts the 20-case cap to 5,000, skips the per-IP budget (the spend cap still applies), and allows resuming stuck runs |
 
-### Banking77 run
+### Dataset scripts and the report
 
-`node scripts/banking77.mts > run.json` builds a request with 250 messages
-from the [Banking77](https://huggingface.co/datasets/PolyAI/banking77) test
-split (CC BY 4.0; 77 intents, graded by exact match). The cases are fetched
-from Hugging Face, not stored here, and a fixed seed picks the same ones
-every time (`--cases`, `--seed`, `--models` change that). Send it with the
-admin token:
+Two scripts build a `POST /api/runs` body from a public dataset. The cases are
+fetched from Hugging Face, not stored here, and a fixed seed picks the same
+ones every time (`--cases`, `--seed`, `--models`, `--effort` change that).
+
+- `node scripts/banking77.mts > run.json`: 250 messages from the
+  [Banking77](https://huggingface.co/datasets/PolyAI/banking77) test split
+  (CC BY 4.0; 77 intents, graded by exact match).
+- `node scripts/truthfulqa.mts > run.json`: 50 questions from
+  [TruthfulQA](https://huggingface.co/datasets/truthfulqa/truthful_qa)
+  (Apache 2.0), graded by the LLM judge against each reference answer. This
+  is the run hand-labeled for the judge's kappa.
+
+More than 20 cases needs the admin token:
 
 ```bash
 curl -X POST "$URL/api/runs" -H "Authorization: Bearer $EVALBOARD_ADMIN_TOKEN" \
   -H "content-type: application/json" --data @run.json
 ```
+
+`scripts/run-report.mts` prints a run's numbers from the database: rows,
+score, cost, latency percentiles, the time between batches, retries, and the
+judge's agreement with hand labels; `--compare a b` adds an exact McNemar
+test. RESULTS.md lists the commands behind each of its numbers.
 
 ### Tests
 
@@ -170,4 +193,5 @@ Next.js 16 (App Router) · TypeScript · Tailwind CSS · Anthropic SDK · Postgr
 - [x] Persist runs to Postgres and diff two runs (regression view)
 - [x] Prompt variants: A/B two system prompts on the same dataset
 - [x] CSV dataset upload
+- [x] Judge reliability: blind hand labels and Cohen's kappa on the run page
 - [ ] Statistical significance hints for small datasets
