@@ -149,6 +149,16 @@ export function CaseAnswer({ result }: { result: ResultRow | null }) {
     <>
       <DetailRow label="Output" value={result.output || <span className="text-muted">Not saved</span>} mono />
       {result.reasoning && <DetailRow label="Judge's reasoning" value={result.reasoning} />}
+      {result.humanPass != null && (
+        <DetailRow
+          label="Hand label"
+          value={
+            result.humanPass === result.pass
+              ? `${result.humanPass ? "pass" : "fail"}, as the judge said`
+              : `${result.humanPass ? "pass" : "fail"}; the judge said ${result.pass ? "pass" : "fail"}`
+          }
+        />
+      )}
       {result.modelUsed && (
         <DetailRow
           label="Timing and cost"

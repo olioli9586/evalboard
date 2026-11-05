@@ -17,6 +17,7 @@ import {
   STATUS_LABEL,
   workingOn,
 } from "@/components/ui";
+import { judgeAgreement, type Agreement } from "@/lib/agreement";
 import { getPool } from "@/lib/db";
 import { passRate } from "@/lib/diff";
 import { paginate } from "@/lib/paginate";
@@ -69,18 +70,24 @@ export default async function RunPage({ params, searchParams }: Props) {
   const byPosition = new Map(results.map((r) => [r.position, r]));
   const working = workingOn(cases.length, byPosition, run.status);
   const rate = passRate(summary);
+  const agreement = run.grader === "judge" ? judgeAgreement(results) : null;
 
-  // The list shows one page of all cases, or of the failed and errored ones.
+  // The list shows one page of all cases, of the failed and errored ones, or
+  // of the ones where the judge and a hand label disagree.
   const query = await searchParams;
-  const failedOnly = query.show === "failed";
+  const show = query.show === "failed" || (query.show === "disagree" && agreement) ? query.show : undefined;
   const failed = cases.filter((c) => {
     const r = byPosition.get(c.position);
     return r !== undefined && r.pass !== true;
   });
-  const listed = failedOnly ? failed : cases;
+  const disagreed = cases.filter((c) => {
+    const r = byPosition.get(c.position);
+    return r != null && r.pass !== null && r.humanPass != null && r.pass !== r.humanPass;
+  });
+  const listed = show === "failed" ? failed : show === "disagree" ? disagreed : cases;
   const { page, pages, start, items: shown } = paginate(listed, query.page, CASES_PER_PAGE);
   // A bubble opens its case on the unfiltered page that lists it.
-  const paged = failedOnly || cases.length > CASES_PER_PAGE;
+  const paged = show !== undefined || cases.length > CASES_PER_PAGE;
   const caseHref = (position: number) =>
     `${paged ? `?page=${Math.floor(position / CASES_PER_PAGE) + 1}` : ""}#case-${position + 1}`;
   const bubbleSize = cases.length > 500 ? "h-3 w-3" : "h-5 w-5";
@@ -146,6 +153,14 @@ export default async function RunPage({ params, searchParams }: Props) {
             })}
           </div>
 
+          {run.grader === "judge" && !agreement && summary.graded > 0 && (
+            <p className="mt-4 text-[13px]">
+              <Link href={`/runs/${run.id}/label`} className="font-medium text-board underline-offset-4 hover:underline">
+                Hand-label this run to check the judge (admin) →
+              </Link>
+            </p>
+          )}
+
           {run.systemPrompt && (
             <details className="mt-5 text-[13px]">
               <summary className="cursor-pointer font-semibold">System prompt</summary>
@@ -153,6 +168,8 @@ export default async function RunPage({ params, searchParams }: Props) {
             </details>
           )}
         </section>
+
+        {agreement && <AgreementPanel runId={run.id} a={agreement} disagreed={disagreed.length} />}
 
         {others.length > 0 && (
           <section className="mt-6 rounded-xl border border-line bg-card p-5">
@@ -183,12 +200,17 @@ export default async function RunPage({ params, searchParams }: Props) {
           <div className="flex flex-wrap items-baseline gap-x-5 gap-y-2">
             <h2 className="font-display text-xl font-semibold">Cases</h2>
             <nav className="flex gap-4 text-[13px]" aria-label="Which cases">
-              <FilterLink active={!failedOnly} href={`/runs/${run.id}`}>
+              <FilterLink active={!show} href={`/runs/${run.id}`}>
                 All ({cases.length})
               </FilterLink>
-              <FilterLink active={failedOnly} href={`/runs/${run.id}?show=failed`}>
+              <FilterLink active={show === "failed"} href={`/runs/${run.id}?show=failed`}>
                 Failed or errored ({failed.length})
               </FilterLink>
+              {agreement && (
+                <FilterLink active={show === "disagree"} href={`/runs/${run.id}?show=disagree`}>
+                  Judge and hand label disagree ({disagreed.length})
+                </FilterLink>
+              )}
             </nav>
             {listed.length > CASES_PER_PAGE && (
               <span className="font-mono text-[12px] text-muted">
@@ -196,7 +218,11 @@ export default async function RunPage({ params, searchParams }: Props) {
               </span>
             )}
           </div>
-          {shown.length === 0 && <p className="mt-4 text-[13px] text-muted">No failed or errored cases yet.</p>}
+          {shown.length === 0 && (
+            <p className="mt-4 text-[13px] text-muted">
+              {show === "disagree" ? "The judge agreed with every hand label." : "No failed or errored cases yet."}
+            </p>
+          )}
           <ol className="mt-4 space-y-2">
             {shown.map((c) => {
               const result = byPosition.get(c.position) ?? null;
@@ -218,10 +244,70 @@ export default async function RunPage({ params, searchParams }: Props) {
               );
             })}
           </ol>
-          <Pager base={`/runs/${run.id}`} page={page} pages={pages} show={failedOnly ? "failed" : undefined} />
+          <Pager base={`/runs/${run.id}`} page={page} pages={pages} show={show} />
         </section>
       </div>
     </main>
+  );
+}
+
+// The judge's verdicts against the hand labels: kappa with its interval, raw
+// agreement, and the 2x2 table they come from.
+function AgreementPanel({ runId, a, disagreed }: { runId: string; a: Agreement; disagreed: number }) {
+  const cell = "border border-line px-3 py-1.5 text-right tabular-nums";
+  return (
+    <section className="mt-6 rounded-xl border border-line bg-card p-5">
+      <div className="flex flex-wrap items-baseline justify-between gap-2">
+        <h2 className="font-display text-base font-semibold">Judge vs hand labels</h2>
+        <Link href={`/runs/${runId}/label`} className="text-[13px] font-medium text-board underline-offset-4 hover:underline">
+          Label more →
+        </Link>
+      </div>
+      <div className="mt-3 flex flex-wrap items-center gap-x-6 gap-y-3">
+        <span className="font-display text-3xl font-bold tabular-nums">
+          κ {a.kappa === null ? "—" : a.kappa.toFixed(2)}
+        </span>
+        <span className="font-mono text-[12px] text-muted">
+          {a.ci95 && `Cohen's kappa, 95% CI ${a.ci95[0].toFixed(2)} to ${a.ci95[1].toFixed(2)} · `}
+          agreed on {a.agreed} of {a.labeled} labeled ({Math.round((a.agreed / a.labeled) * 100)}%)
+        </span>
+      </div>
+      <table className="mt-4 font-mono text-[12px]">
+        <thead>
+          <tr>
+            <th />
+            <th className={`${cell} font-semibold`}>Hand: pass</th>
+            <th className={`${cell} font-semibold`}>Hand: fail</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <th className={`${cell} text-left font-semibold`}>Judge: pass</th>
+            <td className={cell}>{a.bothPass}</td>
+            <td className={cell}>{a.judgeOnlyPass}</td>
+          </tr>
+          <tr>
+            <th className={`${cell} text-left font-semibold`}>Judge: fail</th>
+            <td className={cell}>{a.humanOnlyPass}</td>
+            <td className={cell}>{a.bothFail}</td>
+          </tr>
+        </tbody>
+      </table>
+      <p className="mt-3 text-[13px] text-muted">
+        {a.kappa === null
+          ? "Both gave every labeled case the same verdict, so kappa is undefined."
+          : "Kappa counts agreement beyond chance: 1 is perfect, 0 is no better than chance."}{" "}
+        The labels were made blind: the labeling page hides the judge&apos;s verdicts.
+        {disagreed > 0 && (
+          <>
+            {" "}
+            <Link href={`/runs/${runId}?show=disagree`} className="font-medium text-board underline-offset-4 hover:underline">
+              Read the {disagreed} disagreement{disagreed === 1 ? "" : "s"} →
+            </Link>
+          </>
+        )}
+      </p>
+    </section>
   );
 }
 
