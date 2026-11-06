@@ -13,6 +13,12 @@ export interface EvalCase {
 
 export type GraderKind = "exact" | "judge";
 
+// How hard a model thinks before answering (output_config.effort). A run
+// without one uses the model's default: medium on Haiku 5.5 and Opus 5.5,
+// high on the rest.
+export type Effort = "low" | "medium" | "high" | "xhigh" | "max";
+export const EFFORTS: Effort[] = ["low", "medium", "high", "xhigh", "max"];
+
 export interface CaseResult {
   output: string;
   pass: boolean;
@@ -24,14 +30,33 @@ export interface CaseResult {
   model_used: string; // may differ from requested if fallback kicked in
 }
 
-// $ per million tokens (input, output)
+// $ per million tokens (input, output). Thinking is billed as output, and
+// the API's output_tokens already includes it. Haiku 5.5 costs $0.50 / $2.50
+// for prompts over 100K tokens; prompts here stay far below that (the system
+// prompt and each input are capped at 4,000 characters).
 export const PRICES: Record<string, { in: number; out: number }> = {
+  "claude-opus-5-5": { in: 4, out: 20 },
+  "claude-sonnet-5-5": { in: 2, out: 10 },
+  "claude-haiku-5-5": { in: 0.1, out: 0.5 },
+  // The previous generation stays launchable, so a run can compare a model
+  // with its successor, and v1 history (which used these) still imports.
   "claude-opus-4-8": { in: 5, out: 25 },
   "claude-sonnet-4-6": { in: 3, out: 15 },
   "claude-haiku-4-5": { in: 1, out: 5 },
 };
 
 export const MODELS = Object.keys(PRICES);
+
+// Haiku 4.5 takes no effort level, and Sonnet 4.6 predates xhigh.
+export function supportsEffort(model: string, effort: Effort): boolean {
+  if (model === "claude-haiku-4-5") return false;
+  if (model === "claude-sonnet-4-6") return effort !== "xhigh";
+  return true;
+}
+
+// Cases per queue delivery. The worker always takes the lowest-numbered cases
+// that have no result yet, so the UI can estimate which are in progress.
+export const BATCH_SIZE = 5;
 
 export function cost(model: string, inTok: number, outTok: number): number {
   const p = PRICES[model] ?? PRICES["claude-opus-4-8"];

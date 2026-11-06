@@ -1,78 +1,184 @@
 "use client";
 
+import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
 import {
-  MODELS,
-  parseCustomCases,
-  SAMPLES,
-  type CaseResult,
-  type EvalCase,
-  type GraderKind,
-} from "@/lib/eval";
+  CaseDetail,
+  CELL_CLASS,
+  CELL_LABEL,
+  cellState,
+  formatWhen,
+  isFinished,
+  runLabel,
+  shortModel,
+  SiteHeader,
+  STATUS_LABEL,
+  workingOn,
+} from "@/components/ui";
+import { passRate } from "@/lib/diff";
+import { parseCsvCases } from "@/lib/csv";
+import { EFFORTS, MODELS, parseCustomCases, SAMPLES, type Effort, type EvalCase, type GraderKind } from "@/lib/eval";
 import {
-  deleteRun,
-  loadRuns,
-  saveRun,
-  transition,
-  type SavedRun,
-  type Transition,
+  addToHistory,
+  clearLegacyRuns,
+  forgetRuns,
+  loadHistory,
+  loadLegacyRuns,
+  removeFromHistory,
 } from "@/lib/history";
+import type { ResultRow, Run, RunListItem, RunSummary } from "@/lib/store";
 
-type Cell =
-  | { status: "idle" }
-  | { status: "running" }
-  | { status: "done"; r: CaseResult }
-  | { status: "error"; error: string };
+// A run as it arrives over JSON: dates are strings.
+type RunJson = Omit<Run, "createdAt" | "startedAt" | "finishedAt" | "resumedAt"> & { createdAt: string };
+type HistoryRun = RunJson & Pick<RunListItem, "datasetName" | "summary">;
 
-type Grid = Record<string, Cell[]>; // model -> per-case cell
-
-// What the current results were produced from. The setup form stays editable
-// after a run, so results, case detail, and export read from this snapshot
-// rather than from the live form state.
-interface RunSnapshot {
-  dataset: string;
-  system: string;
-  grader: GraderKind;
-  cases: EvalCase[];
-  models: string[];
+interface LiveRun {
+  run: RunJson;
+  summary: RunSummary;
+  results: ResultRow[];
 }
 
-const MAX_CASES = 20;
-const CONCURRENCY = 3;
+// What a launch was made from. The setup form stays editable afterwards, so
+// the scoreboard, case detail and export read from this snapshot.
+interface Launch {
+  dataset: string;
+  prompts: { system: string; label?: string }[];
+  grader: GraderKind;
+  cases: EvalCase[];
+  runs: { id: string; model: string; promptLabel: string | null; effort: Effort | null; status: Run["status"] }[];
+}
+
+const MAX_CASES = 20; // the server's cap for public runs (MAX_PUBLIC_CASES)
+const MAX_CSV_BYTES = 1_000_000;
+const POLL_MS = 2000;
+
+// The v1 history moves to the server once per page load, also when React's
+// Strict Mode runs effects twice in development. The server side is
+// idempotent anyway; this saves a request.
+let legacyImport: Promise<number> | undefined;
+
+async function importLegacyHistory(): Promise<number> {
+  const runs = loadLegacyRuns();
+  if (runs.length === 0) return 0;
+  const res = await fetch("/api/runs/import", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ runs }),
+  });
+  // Keep the old history on failure; the next visit tries again.
+  if (!res.ok) return 0;
+  const data: { imported: { runs: { id: string }[] }[] } = await res.json();
+  addToHistory(data.imported.flatMap((i) => i.runs.map((r) => r.id)));
+  clearLegacyRuns();
+  return data.imported.length;
+}
 
 export default function Home() {
   const [datasetIdx, setDatasetIdx] = useState(0); // index into SAMPLES, or -1 = custom
   const [customText, setCustomText] = useState("");
   const [system, setSystem] = useState(SAMPLES[0].system);
+  const [abTest, setAbTest] = useState(false); // run a second prompt against the same cases
+  const [systemB, setSystemB] = useState("");
+  const [csv, setCsv] = useState<{ name: string; cases: EvalCase[]; total: number } | null>(null);
+  const [csvError, setCsvError] = useState("");
   const [grader, setGrader] = useState<GraderKind>(SAMPLES[0].grader);
+  const [effort, setEffort] = useState<Effort | null>(null); // null: each model's default
   const [selectedModels, setSelectedModels] = useState<string[]>([
-    "claude-haiku-4-5",
-    "claude-sonnet-4-6",
+    "claude-haiku-5-5",
+    "claude-sonnet-5-5",
   ]);
-  const [grid, setGrid] = useState<Grid>({});
-  const [lastRun, setLastRun] = useState<RunSnapshot | null>(null);
-  const [running, setRunning] = useState(false);
+  const [launch, setLaunch] = useState<Launch | null>(null);
+  const [live, setLive] = useState<Record<string, LiveRun>>({});
+  const [launching, setLaunching] = useState(false);
   const [runError, setRunError] = useState("");
-  const [detail, setDetail] = useState<{ model: string; idx: number } | null>(null);
-  const [runs, setRuns] = useState<SavedRun[]>([]);
+  const [detail, setDetail] = useState<{ runId: string; idx: number } | null>(null);
+  const [history, setHistory] = useState<HistoryRun[] | null>(null); // null until loaded
+  const [historyError, setHistoryError] = useState("");
+  const [notice, setNotice] = useState("");
   const [diffPick, setDiffPick] = useState<string[]>([]); // up to 2 run ids
-
-  useEffect(() => {
-    setRuns(loadRuns());
-  }, []);
 
   const cases: EvalCase[] = useMemo(() => {
     if (datasetIdx >= 0) return SAMPLES[datasetIdx].cases;
+    if (csv) return csv.cases;
     return parseCustomCases(customText, MAX_CASES);
-  }, [datasetIdx, customText]);
+  }, [datasetIdx, customText, csv]);
+  const prompts = abTest ? [{ system, label: "A" }, { system: systemB, label: "B" }] : [{ system }];
+
+  const running = launch !== null && launch.runs.some((r) => !isFinished(live[r.id]?.run.status ?? r.status));
+
+  async function refreshHistory() {
+    const ids = loadHistory();
+    if (ids.length === 0) {
+      setHistory([]);
+      return;
+    }
+    try {
+      const res = await fetch(`/api/runs?ids=${ids.join(",")}`, { cache: "no-store" });
+      const data = await res.json().catch(() => null);
+      if (!res.ok || !data) throw new Error(data?.error ?? `HTTP ${res.status}`);
+      const runs: HistoryRun[] = data.runs;
+      const found = new Set(runs.map((r) => r.id));
+      forgetRuns(ids.filter((id) => !found.has(id)));
+      setHistory(runs);
+      setHistoryError("");
+    } catch (err) {
+      setHistoryError(`Could not load your runs: ${(err as Error).message}`);
+    }
+  }
+
+  // On first load: move any v1 history to the server, then load the list.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const moved = await (legacyImport ??= importLegacyHistory().catch(() => 0));
+      if (cancelled) return;
+      if (moved > 0) {
+        setNotice(`Moved ${moved} saved run${moved === 1 ? "" : "s"} from this browser to the server.`);
+      }
+      await refreshHistory();
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // Poll every run of the current launch until all have finished. Each run is
+  // fetched at least once, so a run that failed to queue shows its error.
+  useEffect(() => {
+    if (!launch) return;
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const open = new Set(launch.runs.map((r) => r.id));
+
+    async function tick() {
+      await Promise.all(
+        [...open].map(async (id) => {
+          try {
+            const res = await fetch(`/api/runs/${id}`, { cache: "no-store" });
+            if (!res.ok) return; // try again on the next tick
+            const data: LiveRun = await res.json();
+            if (cancelled) return;
+            setLive((prev) => ({ ...prev, [id]: data }));
+            if (isFinished(data.run.status)) open.delete(id);
+          } catch {
+            // a network blip; the next tick retries
+          }
+        }),
+      );
+      if (cancelled) return;
+      if (open.size > 0) timer = setTimeout(tick, POLL_MS);
+      else refreshHistory();
+    }
+    tick();
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [launch]);
 
   function pickDataset(idx: number) {
-    // Switching mid-run would wipe the grid while workers are still filling it.
-    if (running) return;
+    if (launching) return;
     setDatasetIdx(idx);
-    setGrid({});
-    setLastRun(null);
-    setDetail(null);
     if (idx >= 0) {
       setSystem(SAMPLES[idx].system);
       setGrader(SAMPLES[idx].grader);
@@ -80,102 +186,72 @@ export default function Home() {
   }
 
   async function runAll() {
-    if (running || cases.length === 0 || selectedModels.length === 0) return;
-    setRunning(true);
+    if (launching || running || cases.length === 0 || selectedModels.length === 0) return;
+    setLaunching(true);
     setRunError("");
     setDetail(null);
 
-    const snapshot: RunSnapshot = {
-      dataset: datasetIdx >= 0 ? SAMPLES[datasetIdx].name : "custom",
-      system,
-      grader,
-      cases,
-      models: [...selectedModels],
-    };
-    const fresh: Grid = {};
-    for (const m of snapshot.models) fresh[m] = cases.map(() => ({ status: "idle" }));
-    setGrid(fresh);
-    setLastRun(snapshot);
-
-    const jobs = snapshot.models.flatMap((model) =>
-      cases.map((c, idx) => ({ model, idx, c })),
-    );
-
-    let cursor = 0;
-    async function worker() {
-      while (cursor < jobs.length) {
-        const job = jobs[cursor++];
-        setGrid((g) => setCell(g, job.model, job.idx, { status: "running" }));
-        try {
-          const res = await fetch("/api/run-case", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              model: job.model,
-              system,
-              input: job.c.input,
-              expected: job.c.expected,
-              grader,
-            }),
-          });
-          // A platform error page (e.g. a function timeout) isn't JSON.
-          const data = await res.json().catch(() => null);
-          if (!res.ok || !data) throw new Error(data?.error ?? `HTTP ${res.status}`);
-          fresh[job.model][job.idx] = { status: "done", r: data };
-          setGrid((g) => setCell(g, job.model, job.idx, { status: "done", r: data }));
-        } catch (err) {
-          fresh[job.model][job.idx] = { status: "error", error: (err as Error).message };
-          setGrid((g) =>
-            setCell(g, job.model, job.idx, { status: "error", error: (err as Error).message }),
-          );
-          if ((err as Error).message.toLowerCase().includes("budget")) {
-            cursor = jobs.length; // stop everything on rate limit
-            setRunError("Daily demo budget reached — remaining cases were skipped.");
-          }
-        }
-      }
+    const dataset = datasetIdx >= 0 ? SAMPLES[datasetIdx].name : (csv?.name ?? "Custom dataset");
+    try {
+      const res = await fetch("/api/runs", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          name: dataset,
+          source: datasetIdx >= 0 ? "sample" : csv ? "csv" : "custom",
+          grader,
+          cases,
+          models: selectedModels,
+          prompts,
+          effort,
+        }),
+      });
+      // A platform error page (e.g. a function timeout) isn't JSON.
+      const data = await res.json().catch(() => null);
+      if (!data?.runs) throw new Error(data?.error ?? `HTTP ${res.status}`);
+      // 502: the runs exist but some couldn't be queued; show the rest.
+      if (data.error) setRunError(data.error);
+      setLive({});
+      setLaunch({ dataset, prompts, grader, cases, runs: data.runs });
+      addToHistory(data.runs.map((r: { id: string }) => r.id));
+      refreshHistory();
+    } catch (err) {
+      setRunError((err as Error).message);
+    } finally {
+      setLaunching(false);
     }
-    await Promise.all(Array.from({ length: CONCURRENCY }, worker));
-    setRunning(false);
+  }
 
-    // Record the run for history/diffing.
-    const models: SavedRun["models"] = {};
-    for (const m of snapshot.models) {
-      const cells = fresh[m];
-      const done = cells.filter((c) => c.status === "done") as Extract<Cell, { status: "done" }>[];
-      models[m] = {
-        passes: cells.map((c) => (c.status === "done" ? c.r.pass : null)),
-        passRate: done.length
-          ? Math.round((done.filter((c) => c.r.pass).length / done.length) * 100)
-          : 0,
-        avgMs: done.length
-          ? Math.round(done.reduce((s, c) => s + c.r.latency_ms, 0) / done.length)
-          : 0,
-        cost: done.reduce((s, c) => s + c.r.cost_usd, 0),
-      };
+  async function uploadCsv(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    e.target.value = ""; // so picking the same file again still fires
+    if (!file) return;
+    setCsvError("");
+    if (file.size > MAX_CSV_BYTES) {
+      setCsvError(`${file.name} is over 1 MB.`);
+      return;
     }
-    setRuns(
-      saveRun({
-        id: crypto.randomUUID(),
-        at: new Date().toISOString(),
-        dataset: snapshot.dataset,
-        grader,
-        system,
-        caseKey: JSON.stringify(cases.map((c) => c.input)),
-        caseCount: cases.length,
-        models,
-      }),
-    );
+    const parsed = parseCsvCases(await file.text(), MAX_CASES);
+    if ("error" in parsed) {
+      setCsvError(`${file.name}: ${parsed.error}`);
+      return;
+    }
+    setCsv({ name: file.name.replace(/\.csv$/i, "").slice(0, 200), ...parsed });
+  }
+
+  function toggleAbTest(on: boolean) {
+    setAbTest(on);
+    if (on && !systemB) setSystemB(system); // B starts as a copy of A
   }
 
   function exportJson() {
-    if (!lastRun) return;
+    if (!launch) return;
     const payload = {
-      dataset: lastRun.dataset,
-      system: lastRun.system,
-      grader: lastRun.grader,
-      cases: lastRun.cases,
-      results: grid,
+      dataset: launch.dataset,
+      prompts: launch.prompts,
+      grader: launch.grader,
+      cases: launch.cases,
+      runs: launch.runs.map((r) => live[r.id] ?? { run: r }),
       exported_at: new Date().toISOString(),
     };
     const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
@@ -187,40 +263,28 @@ export default function Home() {
     URL.revokeObjectURL(url);
   }
 
-  const hasResults = lastRun !== null;
-  const detailCell = detail ? grid[detail.model]?.[detail.idx] : null;
+  const detailResult = detail ? live[detail.runId]?.results.find((r) => r.position === detail.idx) : undefined;
+  const detailRun = detail ? launch?.runs.find((r) => r.id === detail.runId) : undefined;
+  const picked = (history ?? []).filter((r) => diffPick.includes(r.id));
+  // Baseline = the older run.
+  const [base, next] = [...picked].sort((a, b) => a.createdAt.localeCompare(b.createdAt));
 
   return (
     <main className="min-h-screen">
-      {/* App header */}
-      <header className="bg-board">
-        <div className="mx-auto flex max-w-4xl flex-wrap items-end justify-between gap-x-8 gap-y-4 px-6 py-8">
-          <div>
-            <div className="flex items-center gap-3">
-              <span className="flex gap-1" aria-hidden="true">
-                <span className="h-2.5 w-2.5 rounded-full bg-chalk" />
-                <span className="h-2.5 w-2.5 rounded-full bg-chalk" />
-                <span className="h-2.5 w-2.5 rounded-full bg-fail" />
-                <span className="h-2.5 w-2.5 rounded-full bg-chalk" />
-                <span className="h-2.5 w-2.5 rounded-full border border-chalk-dim" />
-              </span>
-              <h1 className="font-display text-3xl font-semibold text-chalk">Evalboard</h1>
-            </div>
-            <p className="mt-2 max-w-xl text-[14px] leading-relaxed text-chalk-dim">
-              Run a dataset against Claude models, grade every answer — exact match or
-              LLM judge — and compare accuracy, latency, and cost.
-            </p>
-          </div>
-          <a
-            href="https://github.com/olioli9586/evalboard"
-            className="text-[13px] font-medium text-chalk-dim underline-offset-4 transition hover:text-chalk hover:underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-chalk"
-          >
-            View source
-          </a>
-        </div>
-      </header>
+      <SiteHeader>
+        <p className="mt-2 max-w-xl text-[14px] leading-relaxed text-chalk-dim">
+          Run a dataset against Claude models, grade every answer — exact match or
+          LLM judge — and compare accuracy, latency, and cost.
+        </p>
+      </SiteHeader>
 
       <div className="mx-auto max-w-4xl px-6 pb-24">
+        {notice && (
+          <p role="status" className="mt-6 rounded-md border border-board/30 bg-board/5 px-4 py-3 text-sm text-board">
+            {notice}
+          </p>
+        )}
+
         {/* Setup */}
         <section className="mt-8 rounded-xl border border-line bg-card p-6">
           <h2 className="font-display text-xl font-semibold">Set up a run</h2>
@@ -233,13 +297,13 @@ export default function Home() {
                     <Chip
                       key={s.name}
                       active={datasetIdx === i}
-                      disabled={running}
+                      disabled={launching}
                       onClick={() => pickDataset(i)}
                     >
                       {s.name}
                     </Chip>
                   ))}
-                  <Chip active={datasetIdx === -1} disabled={running} onClick={() => pickDataset(-1)}>
+                  <Chip active={datasetIdx === -1} disabled={launching} onClick={() => pickDataset(-1)}>
                     Custom
                   </Chip>
                 </div>
@@ -247,29 +311,89 @@ export default function Home() {
                   <p className="mt-2 text-[13px] text-muted">
                     {SAMPLES[datasetIdx].description} · {cases.length} cases
                   </p>
+                ) : csv ? (
+                  <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 rounded-md border border-line px-3 py-2 text-[13px]">
+                    <span className="font-mono">{csv.name}.csv</span>
+                    <span className="text-muted">
+                      {csv.cases.length === csv.total
+                        ? `${csv.total} cases`
+                        : `first ${csv.cases.length} of ${csv.total} rows (public runs take up to ${MAX_CASES})`}
+                    </span>
+                    <button
+                      onClick={() => setCsv(null)}
+                      disabled={launching}
+                      className="ml-auto font-medium text-board underline-offset-4 hover:underline disabled:opacity-40"
+                    >
+                      Remove file
+                    </button>
+                  </div>
                 ) : (
-                  <textarea
-                    value={customText}
-                    onChange={(e) => setCustomText(e.target.value)}
-                    rows={5}
-                    placeholder={"One case per line: input | expected\nWhat is 2+2? | 4"}
-                    className="mt-2 w-full resize-y rounded-md border border-line bg-card px-3 py-2 font-mono text-[13px] outline-none focus:border-board"
-                  />
+                  <>
+                    <textarea
+                      value={customText}
+                      onChange={(e) => setCustomText(e.target.value)}
+                      rows={5}
+                      placeholder={"One case per line: input | expected\nWhat is 2+2? | 4"}
+                      className="mt-2 w-full resize-y rounded-md border border-line bg-card px-3 py-2 font-mono text-[13px] outline-none focus:border-board"
+                    />
+                    <label className="mt-1 inline-block cursor-pointer text-[13px] font-medium text-board underline-offset-4 hover:underline focus-within:underline">
+                      <input type="file" accept=".csv,text/csv" onChange={uploadCsv} className="sr-only" />
+                      Or upload a CSV
+                    </label>
+                    <span className="text-[12px] text-muted">
+                      {" "}
+                      with input and expected columns (or question and answer, or the first two columns)
+                    </span>
+                  </>
+                )}
+                {datasetIdx === -1 && csvError && (
+                  <p role="alert" className="mt-2 text-[13px] text-fail">
+                    {csvError}
+                  </p>
                 )}
               </div>
 
               <div>
-                <Label>System prompt</Label>
+                <div className="flex flex-wrap items-baseline justify-between gap-2">
+                  <Label>{abTest ? "Prompt A" : "System prompt"}</Label>
+                  <label className="flex cursor-pointer items-center gap-2 text-[12px]">
+                    <input
+                      type="checkbox"
+                      checked={abTest}
+                      disabled={launching}
+                      onChange={(e) => toggleAbTest(e.target.checked)}
+                      className="h-3.5 w-3.5 accent-[#14332c]"
+                    />
+                    A/B test a second prompt
+                  </label>
+                </div>
                 <p className="mt-1 text-[12px] text-muted">
-                  This is the prompt you&apos;re testing — edit it between runs to measure the
-                  difference.
+                  {abTest
+                    ? "Each model runs both prompts on the same cases, so A and B can be compared case by case."
+                    : "This is the prompt you\u2019re testing. Edit it between runs, or turn on A/B to test two at once."}
                 </p>
                 <textarea
                   value={system}
                   onChange={(e) => setSystem(e.target.value)}
                   rows={3}
+                  aria-label={abTest ? "Prompt A" : "System prompt"}
                   className="mt-2 w-full resize-y rounded-md border border-line bg-card px-3 py-2 font-mono text-[13px] outline-none focus:border-board"
                 />
+                {abTest && (
+                  <div className="mt-3">
+                    <Label>Prompt B</Label>
+                    <textarea
+                      value={systemB}
+                      onChange={(e) => setSystemB(e.target.value)}
+                      rows={3}
+                      aria-label="Prompt B"
+                      className="mt-2 w-full resize-y rounded-md border border-line bg-card px-3 py-2 font-mono text-[13px] outline-none focus:border-board"
+                    />
+                    {systemB === system && (
+                      <p className="mt-1 text-[12px] text-muted">B is the same as A. Change it to see the difference.</p>
+                    )}
+                  </div>
+                )}
               </div>
             </div>
 
@@ -289,7 +413,7 @@ export default function Home() {
                         }
                         className="h-3.5 w-3.5 accent-[#14332c]"
                       />
-                      {m.replace("claude-", "")}
+                      {shortModel(m)}
                     </label>
                   ))}
                 </div>
@@ -308,19 +432,42 @@ export default function Home() {
                 <p className="mt-2 text-[12px] leading-snug text-muted">
                   {grader === "exact"
                     ? "Case-insensitive string comparison. Free and deterministic."
-                    : "Opus 4.8 compares each answer to the expected one and explains its verdict."}
+                    : "Opus 5.5 compares each answer to the expected one and explains its verdict."}
+                </p>
+              </div>
+
+              <div>
+                <Label>Effort</Label>
+                <div className="mt-2 flex flex-wrap gap-2">
+                  <Chip active={effort === null} onClick={() => setEffort(null)}>
+                    Default
+                  </Chip>
+                  {EFFORTS.map((e) => (
+                    <Chip key={e} active={effort === e} onClick={() => setEffort(e)}>
+                      {e}
+                    </Chip>
+                  ))}
+                </div>
+                <p className="mt-2 text-[12px] leading-snug text-muted">
+                  How much the model thinks before answering. More thinking costs output tokens and time. Default
+                  is each model&apos;s own level. Haiku 4.5 takes none.
                 </p>
               </div>
 
               <button
                 onClick={runAll}
-                disabled={running || cases.length === 0 || selectedModels.length === 0}
+                disabled={launching || running || cases.length === 0 || selectedModels.length === 0}
                 className="w-full rounded-lg bg-board px-4 py-2.5 text-sm font-semibold text-chalk transition hover:bg-[#1d4a40] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-board disabled:cursor-not-allowed disabled:opacity-40"
               >
-                {running
-                  ? "Running…"
-                  : `Run ${cases.length * selectedModels.length || ""} tests`}
+                {launching
+                  ? "Starting…"
+                  : running
+                    ? "Running…"
+                    : `Run ${cases.length * selectedModels.length * prompts.length || ""} tests`}
               </button>
+              <p className="text-[12px] leading-snug text-muted">
+                Runs happen on the server: you can close the tab and come back.
+              </p>
             </div>
           </div>
         </section>
@@ -332,7 +479,7 @@ export default function Home() {
         )}
 
         {/* Results — empty state invites the first run */}
-        {!hasResults && (
+        {!launch && (
           <section className="mt-12">
             <h2 className="font-display text-xl font-semibold">Results</h2>
             <div className="mt-4 rounded-xl border border-line bg-card p-6">
@@ -350,7 +497,7 @@ export default function Home() {
         )}
 
         {/* Scoreboard */}
-        {hasResults && (
+        {launch && (
           <section className="mt-12">
             <div className="flex items-baseline justify-between">
               <h2 className="font-display text-xl font-semibold">Results</h2>
@@ -363,52 +510,57 @@ export default function Home() {
             </div>
 
             <div className="mt-4 space-y-3">
-              {lastRun.models.map((model) => {
-                const cells = grid[model] ?? [];
-                const done = cells.filter((c) => c.status === "done") as Extract<Cell, { status: "done" }>[];
-                const passed = done.filter((c) => c.r.pass).length;
-                const avgMs = done.length
-                  ? Math.round(done.reduce((s, c) => s + c.r.latency_ms, 0) / done.length)
-                  : 0;
-                const totalCost = done.reduce((s, c) => s + c.r.cost_usd, 0);
-                const rate = done.length ? Math.round((passed / done.length) * 100) : null;
+              {launch.runs.map((r) => {
+                const lr = live[r.id];
+                const status = lr?.run.status ?? r.status;
+                const summary = lr?.summary;
+                const byPosition = new Map((lr?.results ?? []).map((x) => [x.position, x]));
+                const working = workingOn(launch.cases.length, byPosition, status);
+                const rate = summary ? passRate(summary) : null;
                 return (
-                  <div key={model} className="rounded-xl border border-line bg-card p-5">
+                  <div key={r.id} className="rounded-xl border border-line bg-card p-5">
                     <div className="flex flex-wrap items-center gap-x-6 gap-y-3">
-                      <span className="w-40 font-mono text-[13px] font-medium">
-                        {model.replace("claude-", "")}
-                      </span>
+                      <span className="w-40 font-mono text-[13px] font-medium">{runLabel(r)}</span>
                       <span className="font-display text-3xl font-bold tabular-nums">
                         {rate === null ? "—" : `${rate}%`}
                       </span>
                       {/* Answer bubbles — the signature: one per case, filled as graded */}
-                      <div className="flex gap-1" role="img" aria-label={`${passed} of ${done.length} passed`}>
-                        {cells.map((cell, idx) => (
-                          <button
-                            key={idx}
-                            onClick={() =>
-                              (cell.status === "done" || cell.status === "error") &&
-                              setDetail({ model, idx })
-                            }
-                            title={`case ${idx + 1}`}
-                            className={`h-5 w-5 rounded-full transition focus-visible:outline focus-visible:outline-2 focus-visible:outline-board ${
-                              cell.status === "done"
-                                ? cell.r.pass
-                                  ? "cell-pop cursor-pointer bg-pass hover:opacity-80"
-                                  : "cell-pop cursor-pointer bg-fail hover:opacity-80"
-                                : cell.status === "running"
-                                  ? "animate-pulse bg-board/30"
-                                  : cell.status === "error"
-                                    ? "cursor-pointer border-2 border-fail bg-fail/10 hover:bg-fail/25"
-                                    : "border border-line"
-                            }`}
-                          />
-                        ))}
+                      <div
+                        className="flex flex-wrap gap-1"
+                        role="img"
+                        aria-label={summary ? `${summary.passed} of ${summary.graded} passed` : "no results yet"}
+                      >
+                        {launch.cases.map((_, idx) => {
+                          const result = byPosition.get(idx);
+                          const state = cellState(result, working.has(idx));
+                          return (
+                            <button
+                              key={idx}
+                              onClick={() => result && setDetail({ runId: r.id, idx })}
+                              title={`case ${idx + 1}: ${CELL_LABEL[state]}`}
+                              className={`h-5 w-5 rounded-full transition focus-visible:outline focus-visible:outline-2 focus-visible:outline-board ${CELL_CLASS[state]} ${result ? "cursor-pointer hover:opacity-80" : ""}`}
+                            />
+                          );
+                        })}
                       </div>
                       <span className="ml-auto font-mono text-[12px] text-muted">
-                        {avgMs ? `${avgMs} ms avg` : ""}
-                        {totalCost ? ` · $${totalCost.toFixed(4)}` : ""}
+                        {summary?.avgLatencyMs ? `${summary.avgLatencyMs} ms avg` : ""}
+                        {summary?.costUsd ? ` · $${summary.costUsd.toFixed(4)}` : ""}
                       </span>
+                    </div>
+                    <div className="mt-3 flex flex-wrap items-baseline gap-x-4 gap-y-1 text-[12px]">
+                      <span className={status === "failed" ? "text-fail" : "text-muted"}>
+                        {STATUS_LABEL[status]}
+                        {status === "running" && summary && ` · ${summary.done} of ${launch.cases.length}`}
+                        {lr?.run.error && ` · ${lr.run.error}`}
+                      </span>
+                      <Link
+                        href={`/runs/${r.id}`}
+                        target="_blank"
+                        className="ml-auto font-medium text-board underline-offset-4 hover:underline"
+                      >
+                        Share link ↗
+                      </Link>
                     </div>
                   </div>
                 );
@@ -417,21 +569,39 @@ export default function Home() {
             <p className="mt-3 text-[12px] text-muted">
               Select a bubble to see the full input, answer, and verdict.
             </p>
+            {launch.prompts.length === 2 && (
+              <div className="mt-4 flex flex-wrap gap-x-5 gap-y-2 text-[13px]">
+                {[...new Set(launch.runs.map((r) => r.model))].map((model) => {
+                  const a = launch.runs.find((r) => r.model === model && r.promptLabel === "A");
+                  const b = launch.runs.find((r) => r.model === model && r.promptLabel === "B");
+                  if (!a || !b) return null;
+                  return (
+                    <Link
+                      key={model}
+                      href={`/diff?a=${a.id}&b=${b.id}`}
+                      className="font-medium text-board underline-offset-4 hover:underline"
+                    >
+                      {shortModel(model)}: compare prompt A → B
+                    </Link>
+                  );
+                })}
+              </div>
+            )}
           </section>
         )}
 
         {/* Case detail */}
-        {lastRun && detail && detailCell && (detailCell.status === "done" || detailCell.status === "error") && (
+        {launch && detail && detailRun && detailResult && (
           <section className="mt-8 rounded-xl border border-board/30 bg-card p-5">
             <div className="flex items-baseline justify-between gap-4">
               <h3 className="font-display text-base font-semibold">
-                Case {detail.idx + 1} · {detail.model.replace("claude-", "")} —{" "}
-                {detailCell.status === "done" ? (
-                  <span className={detailCell.r.pass ? "text-pass" : "text-fail"}>
-                    {detailCell.r.pass ? "Pass" : "Fail"}
-                  </span>
-                ) : (
+                Case {detail.idx + 1} · {shortModel(detailRun.model)} —{" "}
+                {detailResult.pass === null ? (
                   <span className="text-fail">Error</span>
+                ) : (
+                  <span className={detailResult.pass ? "text-pass" : "text-fail"}>
+                    {detailResult.pass ? "Pass" : "Fail"}
+                  </span>
                 )}
               </h3>
               <button
@@ -441,78 +611,65 @@ export default function Home() {
                 Close
               </button>
             </div>
-            <dl className="mt-4 space-y-3 text-[14px]">
-              <DetailRow label="Input" value={lastRun.cases[detail.idx]?.input ?? ""} />
-              <DetailRow label="Expected" value={lastRun.cases[detail.idx]?.expected ?? ""} />
-              {detailCell.status === "done" ? (
-                <>
-                  <DetailRow label="Output" value={detailCell.r.output} mono />
-                  {detailCell.r.reasoning && (
-                    <DetailRow label="Judge's reasoning" value={detailCell.r.reasoning} />
-                  )}
-                  <DetailRow
-                    label="Timing and cost"
-                    value={`${detailCell.r.latency_ms} ms · ${detailCell.r.input_tokens} in / ${detailCell.r.output_tokens} out tokens · $${detailCell.r.cost_usd.toFixed(5)} · served by ${detailCell.r.model_used}`}
-                    mono
-                  />
-                </>
-              ) : (
-                <DetailRow label="What went wrong" value={detailCell.error} mono />
-              )}
-            </dl>
+            <div className="mt-4">
+              <CaseDetail
+                input={launch.cases[detail.idx]?.input ?? ""}
+                expected={launch.cases[detail.idx]?.expected ?? ""}
+                result={detailResult}
+              />
+            </div>
           </section>
         )}
 
         {/* Run history + diff */}
-        {runs.length > 0 && (
+        {(historyError || (history && history.length > 0)) && (
           <section className="mt-14">
-            <h2 className="font-display text-xl font-semibold">Run history</h2>
+            <h2 className="font-display text-xl font-semibold">Your runs</h2>
             <p className="mt-1 text-[13px] text-muted">
               Pick two runs of the same dataset to compare them case by case.
             </p>
+            {historyError && <p className="mt-3 text-[13px] text-fail">{historyError}</p>}
             <ul className="mt-4 space-y-2">
-              {runs.map((run) => {
-                const picked = diffPick.includes(run.id);
+              {(history ?? []).map((run) => {
+                const isPicked = diffPick.includes(run.id);
+                const rate = passRate(run.summary);
                 return (
                   <li
                     key={run.id}
                     className={`flex flex-wrap items-center gap-x-4 gap-y-1 rounded-md border px-4 py-2.5 font-mono text-[12px] ${
-                      picked ? "border-board bg-board/5" : "border-line bg-card"
+                      isPicked ? "border-board bg-board/5" : "border-line bg-card"
                     }`}
                   >
                     <input
                       type="checkbox"
-                      checked={picked}
+                      checked={isPicked}
                       onChange={() =>
                         setDiffPick((prev) =>
-                          picked ? prev.filter((id) => id !== run.id) : [...prev, run.id].slice(-2),
+                          isPicked ? prev.filter((id) => id !== run.id) : [...prev, run.id].slice(-2),
                         )
                       }
                       className="h-3.5 w-3.5 accent-[#14332c]"
                       aria-label="select run for diff"
                     />
-                    <span className="text-ink">{run.dataset}</span>
-                    <span className="text-muted">
-                      {new Date(run.at).toLocaleString("en-US", {
-                        month: "short",
-                        day: "numeric",
-                        hour: "2-digit",
-                        minute: "2-digit",
-                      })}
-                    </span>
+                    <Link href={`/runs/${run.id}`} className="text-ink underline-offset-4 hover:underline">
+                      {run.datasetName}
+                    </Link>
+                    <span className="text-muted">{formatWhen(run.createdAt)}</span>
                     <span className="text-muted">{run.grader}</span>
+                    {run.importedFrom && <span className="text-muted">imported</span>}
                     <span className="ml-auto text-muted">
-                      {Object.entries(run.models)
-                        .map(([m, r]) => `${m.replace("claude-", "")} ${r.passRate}%`)
-                        .join(" · ")}
+                      {runLabel(run)} ·{" "}
+                      {isFinished(run.status) && rate !== null ? `${rate}%` : STATUS_LABEL[run.status]}
                     </span>
                     <button
                       onClick={() => {
-                        setRuns(deleteRun(run.id));
+                        removeFromHistory(run.id);
+                        setHistory((prev) => (prev ?? []).filter((r) => r.id !== run.id));
                         setDiffPick((prev) => prev.filter((id) => id !== run.id));
                       }}
                       className="text-muted transition hover:text-fail focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-board"
-                      aria-label="delete run"
+                      aria-label="remove from this list"
+                      title="Remove from this list (the run stays reachable by its link)"
                     >
                       ✕
                     </button>
@@ -521,12 +678,26 @@ export default function Home() {
               })}
             </ul>
 
-            {diffPick.length === 2 && <DiffPanel runs={runs} pick={diffPick} />}
+            {base && next && (
+              base.datasetId === next.datasetId ? (
+                <Link
+                  href={`/diff?a=${base.id}&b=${next.id}`}
+                  className="mt-4 inline-block rounded-lg bg-board px-4 py-2 text-sm font-semibold text-chalk transition hover:bg-[#1d4a40] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-board"
+                >
+                  Compare {shortModel(base.model)} → {shortModel(next.model)} case by case
+                </Link>
+              ) : (
+                <p className="mt-4 rounded-md border border-line bg-card px-4 py-3 text-[13px] text-muted">
+                  These runs used different cases, so a case-by-case comparison isn&apos;t meaningful.
+                  Pick two runs of the same dataset.
+                </p>
+              )
+            )}
           </section>
         )}
 
         <footer className="mt-20 flex flex-wrap items-center justify-between gap-2 border-t border-line pt-5 text-[12px] text-muted">
-          <span>Run history is saved in this browser.</span>
+          <span>Runs are stored on the server; this browser remembers which ones are yours.</span>
           <a
             className="font-medium underline-offset-4 transition hover:text-board hover:underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-board"
             href="https://github.com/olioli9586/evalboard"
@@ -537,110 +708,6 @@ export default function Home() {
       </div>
     </main>
   );
-}
-
-const TRANSITION_STYLE: Record<Transition, { cls: string; label: string }> = {
-  "pass-pass": { cls: "bg-pass/55", label: "pass → pass" },
-  "fail-fail": { cls: "bg-line", label: "fail → fail" },
-  fixed: { cls: "bg-board", label: "fixed" },
-  regressed: { cls: "bg-fail", label: "regressed" },
-  ungraded: { cls: "border border-dashed border-line", label: "ungraded" },
-};
-
-function DiffPanel({ runs, pick }: { runs: SavedRun[]; pick: string[] }) {
-  const picked = runs.filter((r) => pick.includes(r.id));
-  if (picked.length !== 2) return null;
-  // Baseline = the older run.
-  const [base, next] = [...picked].sort((a, b) => a.at.localeCompare(b.at));
-
-  if (base.caseKey !== next.caseKey) {
-    return (
-      <p className="mt-4 rounded-md border border-line bg-card px-4 py-3 text-[13px] text-muted">
-        These runs used different cases, so a case-by-case comparison isn&apos;t meaningful.
-        Pick two runs of the same dataset.
-      </p>
-    );
-  }
-
-  const sharedModels = Object.keys(base.models).filter((m) => m in next.models);
-  const promptChanged = base.system !== next.system;
-
-  return (
-    <div className="mt-4 rounded-xl border border-board/30 bg-card p-5">
-      <h3 className="font-display text-base font-semibold">
-        Comparing runs · {new Date(base.at).toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit" })}{" "}
-        → {new Date(next.at).toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit" })}
-      </h3>
-      {promptChanged && (
-        <p className="mt-2 text-[13px] font-medium text-board">
-          The system prompt changed between these runs.
-        </p>
-      )}
-
-      <div className="mt-4 space-y-4">
-        {sharedModels.length === 0 && (
-          <p className="text-[13px] text-muted">No model appears in both runs.</p>
-        )}
-        {sharedModels.map((model) => {
-          const a = base.models[model];
-          const b = next.models[model];
-          const trans = a.passes.map((p, i) => transition(p, b.passes[i]));
-          const fixed = trans.filter((t) => t === "fixed").length;
-          const regressed = trans.filter((t) => t === "regressed").length;
-          const delta = b.passRate - a.passRate;
-          return (
-            <div key={model}>
-              <div className="flex flex-wrap items-baseline gap-x-4 gap-y-1">
-                <span className="w-40 font-mono text-[13px] font-medium">
-                  {model.replace("claude-", "")}
-                </span>
-                <span className="font-display text-xl font-bold tabular-nums">
-                  {a.passRate}% → {b.passRate}%
-                </span>
-                <span
-                  className={`font-mono text-[12px] ${
-                    delta > 0 ? "text-pass" : delta < 0 ? "text-fail" : "text-muted"
-                  }`}
-                >
-                  {delta > 0 ? `+${delta}` : delta} pts
-                </span>
-                <span className="ml-auto font-mono text-[12px] text-muted">
-                  {fixed > 0 && <span className="text-board">{fixed} fixed</span>}
-                  {fixed > 0 && regressed > 0 && " · "}
-                  {regressed > 0 && <span className="text-fail">{regressed} regressed</span>}
-                  {fixed === 0 && regressed === 0 && "no changes"}
-                </span>
-              </div>
-              <div className="mt-2 flex gap-1">
-                {trans.map((t, i) => (
-                  <span
-                    key={i}
-                    title={`case ${i + 1}: ${TRANSITION_STYLE[t].label}`}
-                    className={`h-5 w-5 rounded-full ${TRANSITION_STYLE[t].cls}`}
-                  />
-                ))}
-              </div>
-            </div>
-          );
-        })}
-      </div>
-
-      <div className="mt-5 flex flex-wrap gap-x-4 gap-y-1 border-t border-line pt-3 text-[12px] text-muted">
-        {(Object.keys(TRANSITION_STYLE) as Transition[]).map((t) => (
-          <span key={t} className="flex items-center gap-1.5">
-            <span className={`h-3 w-3 rounded-full ${TRANSITION_STYLE[t].cls}`} />
-            {TRANSITION_STYLE[t].label}
-          </span>
-        ))}
-      </div>
-    </div>
-  );
-}
-
-function setCell(g: Grid, model: string, idx: number, cell: Cell): Grid {
-  const next = { ...g, [model]: [...(g[model] ?? [])] };
-  next[model][idx] = cell;
-  return next;
 }
 
 function Label({ children }: { children: React.ReactNode }) {
@@ -671,16 +738,5 @@ function Chip({
     >
       {children}
     </button>
-  );
-}
-
-function DetailRow({ label, value, mono }: { label: string; value: string; mono?: boolean }) {
-  return (
-    <div>
-      <dt className="text-[12px] font-semibold text-muted">{label}</dt>
-      <dd className={`mt-1 whitespace-pre-wrap leading-relaxed ${mono ? "font-mono text-[13px]" : ""}`}>
-        {value}
-      </dd>
-    </div>
   );
 }

@@ -8,6 +8,7 @@ export default defineConfig({
   test: {
     environment: "node",
     include: ["**/*.test.ts"],
-    exclude: ["node_modules/**", ".next/**"],
+    // *.db.test.ts need Postgres: `npm run test:db`.
+    exclude: ["node_modules/**", ".next/**", "**/*.db.test.ts"],
   },
 });
