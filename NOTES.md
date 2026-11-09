@@ -12,7 +12,7 @@ with what was done, what was decided and why, and the next step.
 | 3 | UI on server runs, `/runs/[id]`, `/diff`, one-time localStorage import | done |
 | 4 | Neon + Queues setup, preview deploy, 250-case Banking77 run, fault-injection resume, record numbers | done (the run past 300 s landed on Day 5) |
 | 5 | Prompt A/B, CSV upload | done |
-| 6 | Hand-label 50 cases, judge kappa, README, RESULTS.md, fresh-context review, PR | done (merge waits for CI: GitHub billing lock) |
+| 6 | Hand-label 50 cases, judge kappa, README, RESULTS.md, fresh-context review, PR | done, merged 2026-11-06 (`1499d5e`) |
 
 "Before" number for the resume bullet: runs were capped at 20 cases
 (`MAX_CASES` in `app/page.tsx`), run from the browser.
@@ -772,3 +772,32 @@ XSS, and no problem with the admin token handling or the paging.
   at delivery 9. A failed run can be resumed.
 - A significance hint in the UI is still on the roadmap. McNemar is in the
   report script only.
+
+**Merge and production (2026-11-06 UTC, same session)**
+- The GitHub billing lock was cleared on the account. A rerun of CI passed
+  (build 33 s, db 36 s), and PR #2 was merged with a merge commit.
+- Production env, before the merge so the deploy picked it up:
+  - removed `EVALBOARD_JUDGE_MODEL`, a v1 leftover set to Sonnet 4.6 that
+    would have overridden the Opus 5.5 judge;
+  - added a production `EVALBOARD_ADMIN_TOKEN`, separate from the preview's
+    (kept in `.env.admin.local`);
+  - set `DAILY_SPEND_CAP_USD=5`.
+  - `DATABASE_URL` was already there from the Neon integration, and
+    migrations 001-006 were already applied, since preview and production
+    share the database.
+- Smoke run on https://evalboard-zeta.vercel.app: 5 public cases, 5/5,
+  $0.00004. It used production's own API key, from v1.
+- Share links in a fresh headless Chrome (no cookies, no Vercel login, as
+  in a private window) all returned 200 with their data: the smoke run, the
+  3,080-case run, and the TruthfulQA run with its kappa panel.
+- **Every "Done when" item for PROJECTS.md item 1 is met.**
+
+**Record for the resume** (PROJECTS.md item 1)
+- Largest run: 20 cases in one browser tab (v1), now 3,080 cases in 17.6 min
+  on the server, past the 300 s function limit.
+- Resume after failure: the worker's deployment was deleted at 120/250. The
+  resumed run reached 250 rows for 250 cases, with the 120 earlier rows
+  unchanged and nothing counted twice.
+- Judge kappa: 0.85 (95% CI 0.68 to 1.00) on 50 blind hand labels.
+
+**Next:** PROJECTS.md item 5 (DealScout v2), in its own repo and branch.
