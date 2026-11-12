@@ -34,6 +34,10 @@ Browser ── POST /api/runs ──▶ one transaction: per-IP budget, dataset,
 - **Models**: Claude Haiku 5.5, Sonnet 5.5 and Opus 5.5, plus the previous
   generation (Haiku 4.5, Sonnet 4.6, Opus 4.8) for comparing a model with
   its successor. Up to 3 per launch.
+- **Custom HTTP endpoints**: a self-hosted model, such as a classifier
+  fine-tuned on Banking77, runs as `endpoint:<name>` next to the Claude
+  models, on the same cases and graders (see
+  [Custom HTTP endpoints](#custom-http-endpoints)).
 - **Datasets**: two built-in samples (classification with exact match; extraction
   with LLM judge), your own pasted as `input | expected` lines, or a CSV file
   (an `input`/`expected` header, `question`/`answer`, or the first two
@@ -91,6 +95,13 @@ Browser ── POST /api/runs ──▶ one transaction: per-IP budget, dataset,
   level is stored on the run and shown wherever the run is. Thinking is billed
   as output and shows up in the cost, and `max_tokens` is 4,096 so it can't
   crowd out the answer.
+- **Endpoints are server config, not request input.** A launch names an
+  endpoint (`endpoint:<name>`) and the server looks up its URL in
+  `EVALBOARD_ENDPOINTS`. Accepting a URL from the browser would let anyone
+  on the public demo make the server POST to any address, internal ones
+  included (SSRF). The browser only ever sees the names, and error messages
+  never include a URL. A malformed config refuses every launch with the
+  reason instead of quietly dropping the endpoint.
 - **Refusals are results.** A case the model declines is recorded as errored,
   with the reason. The API's refusal fallback (another model answers instead)
   is left off: it would put a different model's answer in this model's score.
@@ -140,6 +151,31 @@ working on the newer schema.
 | `DAILY_SPEND_CAP_USD` | `5` | Model + judge spend per day across everyone; checked before each batch |
 | `DEMO_DAILY_CASE_LIMIT` | `60` | Cases x runs per IP per day for public requests |
 | `EVALBOARD_ADMIN_TOKEN` | none | `Authorization: Bearer <token>` lifts the 20-case cap to 5,000, skips the per-IP budget (the spend cap still applies), and allows resuming stuck runs |
+| `EVALBOARD_ENDPOINTS` | none | Self-hosted models to run as `endpoint:<name>`: a JSON object, see below |
+
+### Custom HTTP endpoints
+
+`EVALBOARD_ENDPOINTS` maps a name to an endpoint:
+
+```json
+{"tunebench-modernbert": {"url": "https://x.hf.space/predict", "output_field": "intent", "usd_per_1k": 0}}
+```
+
+`url` (http or https) is required; `output_field` defaults to `"output"` and
+`usd_per_1k`, the price per 1,000 calls, to 0. Unknown keys, bad URLs and bad
+names are errors. The model then shows up in the launch form, and a request
+body or a dataset script (`--models endpoint:tunebench-modernbert`) can name
+it.
+
+For each case the worker POSTs `{"text": <input>, "system": <system prompt>}`
+(a server that only reads `text` can ignore the rest) with a 30 s timeout,
+and reads the answer from `output_field`, which must be a string. 429, 5xx,
+dropped connections and timeouts are retried like model calls; any other
+status (redirects are not followed), a body that isn't JSON or a missing
+field errors the case. Latency is the call that answered, tokens are 0, and
+cost is `usd_per_1k / 1000` per case, which counts toward the daily spend
+cap like model spend. Effort doesn't apply, and the LLM judge (still Claude)
+grades endpoint answers like any other.
 
 ### Dataset scripts and the report
 

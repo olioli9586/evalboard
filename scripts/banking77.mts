@@ -7,7 +7,9 @@
 // its test split and are fetched each time rather than stored in the repo; a
 // fixed seed picks the same ones on every machine. Graded by exact match on
 // the intent name. More than 20 cases needs the admin token. The server
-// checks the body (models, lengths) like any other request.
+// checks the body (models, lengths) like any other request. `--models` also
+// takes a custom endpoint the server has configured, as `endpoint:<name>`: a
+// classifier fine-tuned on Banking77 then runs the same cases as Claude.
 import { parseArgs } from "node:util";
 
 const ROWS_URL = "https://datasets-server.huggingface.co/rows";
