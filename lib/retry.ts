@@ -1,4 +1,5 @@
 import { APIConnectionError, APIConnectionTimeoutError, APIError } from "@anthropic-ai/sdk";
+import { EndpointError } from "./endpoints";
 
 // ---------------------------------------------------------------------------
 // Retry for a single API call: exponential backoff with full jitter on 429,
@@ -26,7 +27,19 @@ export const WORKER_RETRY: RetryOptions = { maxAttempts: 4, baseDelayMs: 1_000, 
 // connections. A timeout is not retried: the call ran for the client's whole
 // timeout, most likely because the answer is that long, so another try would
 // take as long, cost as much, and could outlast the function.
+//
+// A custom endpoint (lib/endpoints.ts) retries 429, any 5xx, dropped
+// connections and timeouts; any other status, or an answer without a usable
+// output field, is final. Its timeouts are retried because a classifier's
+// answer is short: a slow one means the server is busy or still waking up (a
+// sleeping Hugging Face Space), which a later try can ride out. Four 30 s
+// tries take as long as one 120 s model call, so a case still fits in the
+// function (lib/worker-deps.ts).
 export function isRetryable(err: unknown): boolean {
+  if (err instanceof EndpointError) {
+    const status = err.status ?? 0;
+    return err.failure === "connection" || err.failure === "timeout" || status === 429 || status >= 500;
+  }
   if (err instanceof APIConnectionTimeoutError) return false;
   if (err instanceof APIConnectionError) return true;
   if (!(err instanceof APIError) || err.status === undefined) return false;
@@ -36,13 +49,14 @@ export function isRetryable(err: unknown): boolean {
   return err.status === 408 || err.status === 409 || err.status === 429 || err.status >= 500;
 }
 
-// The wait the API asked for, if any: retry-after-ms, then retry-after as
-// seconds or as an HTTP date.
+// The wait the API (or an endpoint) asked for, if any: retry-after-ms, then
+// retry-after as seconds or as an HTTP date.
 export function retryAfterMs(err: unknown): number | undefined {
-  if (!(err instanceof APIError) || !err.headers) return undefined;
-  const ms = Number.parseFloat(err.headers.get("retry-after-ms") ?? "");
+  const headers = err instanceof APIError || err instanceof EndpointError ? err.headers : undefined;
+  if (!headers) return undefined;
+  const ms = Number.parseFloat(headers.get("retry-after-ms") ?? "");
   if (Number.isFinite(ms)) return Math.max(0, ms);
-  const raw = err.headers.get("retry-after");
+  const raw = headers.get("retry-after");
   if (!raw) return undefined;
   const seconds = Number.parseFloat(raw);
   if (Number.isFinite(seconds)) return Math.max(0, seconds * 1000);
