@@ -1,12 +1,15 @@
 import { describe, expect, it } from "vitest";
 import {
   cost,
+  EFFORTS,
   exactMatch,
+  isEndpointModel,
   MODELS,
   normalizeAnswer,
   parseCustomCases,
   PRICES,
   SAMPLES,
+  supportsEffort,
 } from "./eval";
 
 describe("cost", () => {
@@ -29,6 +32,13 @@ describe("cost", () => {
 describe("reference data", () => {
   it("exposes every priced model", () => {
     expect(MODELS).toEqual(Object.keys(PRICES));
+  });
+
+  it("tells endpoint models apart, and gives them no effort level", () => {
+    expect(isEndpointModel("endpoint:tunebench-modernbert")).toBe(true);
+    expect(isEndpointModel("claude-haiku-5-5")).toBe(false);
+    expect(MODELS.some(isEndpointModel)).toBe(false);
+    for (const e of EFFORTS) expect(supportsEffort("endpoint:tunebench-modernbert", e)).toBe(false);
   });
 
   it("ships well-formed sample datasets", () => {
