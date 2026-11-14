@@ -801,3 +801,90 @@ XSS, and no problem with the admin token handling or the paging.
 - Judge kappa: 0.85 (95% CI 0.68 to 1.00) on 50 blind hand labels.
 
 **Next:** PROJECTS.md item 5 (DealScout v2), in its own repo and branch.
+
+## Endpoint models (2026-11-12)
+
+A self-hosted classifier can now run through the same eval as the Claude
+models and show up next to them. The first user is TuneBench's server
+(`POST /predict` with `{"text"}` returns `{"intent", "confidence", "top"}`).
+Branch `endpoint-models`.
+
+**Done**
+- `EVALBOARD_ENDPOINTS` (server env, JSON): name -> `{url, output_field?,
+  usd_per_1k?}`. A run's model is `endpoint:<name>` and is stored like any
+  model string.
+- `lib/endpoints.ts`: strict config parsing and `callEndpoint`, which POSTs
+  `{"text", "system"}` with a 30 s timeout and reads the output field.
+- `lib/run-case.ts`: the target call is split into a Claude path and an
+  endpoint path; grading is shared, so exact match and the Claude judge work
+  for both. Endpoint results have 0 tokens, latency of the call that
+  answered, and `usd_per_1k / 1000` per case.
+- `lib/retry.ts`: endpoint 429, 5xx, dropped connections and timeouts are
+  retried; other statuses, non-JSON bodies and missing fields error the case.
+- `parseCreateRuns` accepts `endpoint:<name>` only for configured names, and
+  `supportsEffort` is false for endpoints.
+- The home page is split: `app/page.tsx` is a server component that reads
+  the config and passes only the names to the launch form, now in
+  `components/home.tsx`.
+- `scripts/banking77.mts --models endpoint:<name>` needed no code change,
+  only a note in its header.
+- Tests: 126 unit and 81 Postgres. Endpoint tests run a real local
+  `http.createServer` through the real fetch. Six planted bugs were each
+  caught: latency counting the backoff, 5xx not retried, any `endpoint:` name
+  accepted, unknown config keys allowed, redirects followed, timeouts not
+  retried.
+- Local end-to-end with no spend: a fake classifier, a fake Anthropic server
+  on `ANTHROPIC_BASE_URL`, the inline queue and a local database.
+  - A mixed launch (Haiku 5.5 and `endpoint:fake-classifier`) finished 8/8
+    on each side.
+  - A 20-case body from `banking77.mts --models endpoint:fake-classifier`
+    ran through.
+  - The endpoint's URL was not in the home page HTML.
+  - A broken config showed its reason on the home page, and `POST /api/runs`
+    answered 500 with it.
+
+**Decisions and why**
+- **Endpoints are server config, never request input.** This is a public
+  deployment. A URL taken from the request body would let anyone make the
+  server POST to any address, internal ones included (SSRF). The browser
+  only gets names.
+- **A bad config fails loudly.** Unknown keys, bad names and non-http(s)
+  URLs are errors, because a misspelled `output_field` would otherwise fall
+  back to `"output"` and fail every case for no visible reason. While the
+  config is broken, every launch gets a 500 with the reason, like a missing
+  API key. The home page shows the reason instead of quietly listing fewer
+  models.
+- **No URL or host in any message.** Case errors end up on public share
+  pages, so a dropped connection reports only its code (`ECONNREFUSED`).
+- **Endpoint timeouts are retried, unlike Claude's.** A classifier's answer
+  is short, so a timeout means the server is busy or still waking up (a
+  sleeping Hugging Face Space), and a later try can ride that out. Four 30 s
+  tries take as long as one 120 s model call.
+- **Redirects are not followed.** The configured URL is the one called, and
+  a redirect errors the case with a hint to configure the final URL.
+- **The endpoint is looked up when each case runs.** A run whose endpoint
+  left the config errors its cases with that reason instead of retrying.
+- **An unusable 2xx answer keeps the call's cost**, as a refused Claude call
+  does.
+- **The home page now renders per request** (`connection()`), so the list
+  matches what `POST /api/runs` accepts. It was prerendered before. The cost
+  is one function call per visit.
+
+**Gotchas**
+- The old local test cluster (`pgdata7`, port 54329) lost its files to the
+  macOS `/private/tmp` cleanup again. A new one (`pgdata8`) runs on 54330.
+- The latency test was flaky in the full parallel suite: on macOS the local
+  request sometimes landed about 435 ms late. The test now moves a shifted
+  clock 10 s forward instead of sleeping, so slow local calls can't fail it.
+- The Hugging Face rows API answered 502 once; a rerun passed.
+
+**Known gaps**
+- No auth header per endpoint, so a private Space can't be called yet. It
+  would need a server-side secret per endpoint.
+- The response body size isn't capped (the config is trusted).
+- Long endpoint names wrap in the scoreboard's label column.
+- Not deployed, and `EVALBOARD_ENDPOINTS` is not set on Vercel.
+
+**Next:** once TuneBench's Space is up, set `EVALBOARD_ENDPOINTS` on Preview,
+run the 250 Banking77 cases on the endpoint and Haiku 5.5, and add the
+comparison to RESULTS.md.

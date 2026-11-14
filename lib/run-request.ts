@@ -22,10 +22,13 @@ export interface CreateRunsRequest {
 }
 
 // Checked field by field: the body is untrusted, and a wrong type would
-// otherwise slip past the length checks.
+// otherwise slip past the length checks. endpointModels are the configured
+// custom endpoints as `endpoint:<name>` (lib/endpoints.ts): a request picks
+// one by name, and any other name is an unknown model.
 export function parseCreateRuns(
   body: unknown,
   maxCases: number,
+  endpointModels: string[] = [],
 ): CreateRunsRequest | { error: string } {
   if (typeof body !== "object" || body === null || Array.isArray(body)) {
     return { error: "Invalid JSON body." };
@@ -66,7 +69,9 @@ export function parseCreateRuns(
     return { error: `models must list 1-${MAX_MODELS} models.` };
   }
   for (const m of models) {
-    if (typeof m !== "string" || !MODELS.includes(m)) return { error: `Unknown model: ${String(m)}` };
+    if (typeof m !== "string" || !(MODELS.includes(m) || endpointModels.includes(m))) {
+      return { error: `Unknown model: ${String(m)}` };
+    }
   }
   if (new Set(models).size !== models.length) {
     return { error: "Each model may appear only once." };

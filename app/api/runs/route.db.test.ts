@@ -204,6 +204,33 @@ describe("POST /api/runs", () => {
     vi.stubEnv("ANTHROPIC_API_KEY", "");
     expect((await post(base)).status).toBe(500);
   });
+
+  it("runs a configured endpoint next to a Claude model, and refuses any other endpoint", async () => {
+    vi.stubEnv("EVALBOARD_ENDPOINTS", '{"tunebench": {"url": "https://x.hf.space/predict", "output_field": "intent"}}');
+    const res = await post({ ...base, models: ["claude-haiku-5-5", "endpoint:tunebench"] });
+    expect(res.status).toBe(201);
+    expect((await res.json()).runs.map((r: { model: string }) => r.model)).toEqual(["claude-haiku-5-5", "endpoint:tunebench"]);
+    expect((await db.query("select model from runs order by model")).rows).toEqual([
+      { model: "claude-haiku-5-5" },
+      { model: "endpoint:tunebench" },
+    ]);
+
+    const unknown = await post({ ...base, name: "Other", models: ["endpoint:elsewhere"] });
+    expect(unknown.status).toBe(400);
+    expect(await unknown.json()).toEqual({ error: "Unknown model: endpoint:elsewhere" });
+    expect(await count("runs")).toBe(2);
+  });
+
+  it("refuses every launch while the endpoint config is broken, with the reason", async () => {
+    vi.stubEnv("EVALBOARD_ENDPOINTS", '{"tunebench": {"url": "https://x.hf.space/predict", "output": "intent"}}');
+    const res = await post(base);
+    expect(res.status).toBe(500);
+    expect((await res.json()).error).toBe(
+      'EVALBOARD_ENDPOINTS: "tunebench" has an unknown key "output" (allowed: url, output_field, usd_per_1k).',
+    );
+    expect(await count("runs")).toBe(0);
+    expect(enqueueBatch).not.toHaveBeenCalled();
+  });
 });
 
 describe("GET /api/runs/[id]", () => {

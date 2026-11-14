@@ -47,9 +47,19 @@ export const PRICES: Record<string, { in: number; out: number }> = {
 
 export const MODELS = Object.keys(PRICES);
 
-// Haiku 4.5 takes no effort level, and Sonnet 4.6 predates xhigh.
+// A self-hosted model behind an HTTP endpoint (lib/endpoints.ts) runs as
+// `endpoint:<name>`. Which names exist is server config, so they are not in
+// MODELS.
+export const ENDPOINT_PREFIX = "endpoint:";
+
+export function isEndpointModel(model: string): boolean {
+  return model.startsWith(ENDPOINT_PREFIX);
+}
+
+// Haiku 4.5 takes no effort level, Sonnet 4.6 predates xhigh, and an
+// endpoint model doesn't think at all.
 export function supportsEffort(model: string, effort: Effort): boolean {
-  if (model === "claude-haiku-4-5") return false;
+  if (model === "claude-haiku-4-5" || isEndpointModel(model)) return false;
   if (model === "claude-sonnet-4-6") return effort !== "xhigh";
   return true;
 }

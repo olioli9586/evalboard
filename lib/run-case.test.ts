@@ -1,4 +1,6 @@
-import { describe, expect, it, vi } from "vitest";
+import http from "node:http";
+import type { AddressInfo } from "node:net";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type Anthropic from "@anthropic-ai/sdk";
 import { APIConnectionTimeoutError, APIError, BadRequestError, NotFoundError } from "@anthropic-ai/sdk";
 import { CaseError, runCase, type CaseRequest } from "./run-case";
@@ -225,5 +227,141 @@ describe("runCase grading", () => {
     const err = await runCase(fakeClient(create), { ...req, model: "claude-opus-5-5" }).catch((e) => e);
     expect(err).toBeInstanceOf(CaseError);
     expect(create).toHaveBeenCalledTimes(1);
+  });
+});
+
+// Endpoint models call a real local server through the real fetch; the
+// Anthropic client is still a fake, used only by the judge.
+describe("runCase on a custom endpoint", () => {
+  let handler: http.RequestListener = (_req, res) => res.end();
+  let server: http.Server;
+  let bodies: unknown[] = [];
+  const endpointReq: CaseRequest = { ...req, model: "endpoint:tunebench" };
+
+  beforeAll(async () => {
+    server = http.createServer((request, res) => {
+      let body = "";
+      request.on("data", (c) => (body += c));
+      request.on("end", () => {
+        bodies.push(JSON.parse(body));
+        handler(request, res);
+      });
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  });
+  beforeEach(() => {
+    bodies = [];
+    const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}/predict`;
+    vi.stubEnv("EVALBOARD_ENDPOINTS", JSON.stringify({ tunebench: { url, output_field: "intent", usd_per_1k: 0.2 } }));
+  });
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    vi.restoreAllMocks();
+  });
+  afterAll(() => {
+    server.closeAllConnections();
+    return new Promise<void>((resolve) => server.close(() => resolve()));
+  });
+
+  const answer = (intent: unknown) => (_req: http.IncomingMessage, res: http.ServerResponse) =>
+    res.end(JSON.stringify({ intent, confidence: 0.97, top: [] }));
+
+  it("grades the endpoint's answer with no tokens and its flat price, without calling Claude", async () => {
+    handler = answer(" Billing ");
+    const create = vi.fn();
+    const { result, attempts } = await runCase(fakeClient(create), endpointReq, retry);
+    expect(attempts).toBe(1);
+    expect(result).toMatchObject({
+      output: "Billing",
+      pass: true,
+      reasoning: "",
+      input_tokens: 0,
+      output_tokens: 0,
+      model_used: "endpoint:tunebench",
+    });
+    expect(result.cost_usd).toBeCloseTo(0.0002, 10);
+    expect(bodies).toEqual([{ text: "I was charged twice.", system: "Classify." }]);
+    expect(create).not.toHaveBeenCalled();
+  });
+
+  it("reads the default output field when none is configured", async () => {
+    const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}/predict`;
+    vi.stubEnv("EVALBOARD_ENDPOINTS", JSON.stringify({ tunebench: { url } }));
+    handler = (_req, res) => res.end(JSON.stringify({ output: "bug" }));
+    const { result } = await runCase(fakeClient(vi.fn()), endpointReq);
+    expect(result).toMatchObject({ output: "bug", pass: false, cost_usd: 0 });
+  });
+
+  it("retries a 503, counts the attempts, and times only the call that worked", async () => {
+    const replies = [503, 200];
+    handler = (request, res) => {
+      if (replies.shift() === 503) return res.writeHead(503).end("loading");
+      answer("billing")(request, res);
+    };
+    // The backoff moves the clock 10 s on instead of sleeping, so a latency
+    // that counted it would show however slow the local calls happen to be.
+    let shift = 0;
+    const now = Date.now.bind(Date);
+    vi.spyOn(Date, "now").mockImplementation(() => now() + shift);
+    const backoff = { ...retry, sleep: async () => void (shift += 10_000) };
+    const { result, attempts } = await runCase(fakeClient(vi.fn()), endpointReq, backoff);
+    expect(attempts).toBe(2);
+    expect(result.pass).toBe(true);
+    expect(shift).toBe(10_000);
+    expect(result.latency_ms).toBeLessThan(5_000);
+  });
+
+  it("marks an endpoint still busy after every attempt as retryable, with its retry-after", async () => {
+    handler = (_req, res) => res.writeHead(429, { "retry-after": "0.01" }).end();
+    const err = await runCase(fakeClient(vi.fn()), endpointReq, retry).catch((e) => e);
+    expect(err).toBeInstanceOf(CaseError);
+    expect(err).toMatchObject({ kind: "model", attempts: 3, retryable: true, retryAfterMs: 10, costUsd: 0 });
+    expect(err.message).toBe("Model call failed: endpoint answered 429");
+  });
+
+  it("errors a case on a client error without retrying it", async () => {
+    handler = (_req, res) => res.writeHead(422).end('{"detail": "text is required"}');
+    const err = await runCase(fakeClient(vi.fn()), endpointReq, retry).catch((e) => e);
+    expect(err).toMatchObject({ kind: "model", attempts: 1, retryable: false, costUsd: 0 });
+    expect(err.message).toBe("Model call failed: endpoint answered 422");
+    expect(bodies).toHaveLength(1);
+  });
+
+  it("errors a case whose answer has no usable output, keeping the call's cost", async () => {
+    for (const reply of [answer(7), (_r: http.IncomingMessage, res: http.ServerResponse) => res.end("not json")]) {
+      handler = reply;
+      const err = await runCase(fakeClient(vi.fn()), endpointReq, retry).catch((e) => e);
+      expect(err).toMatchObject({ kind: "model", attempts: 1, retryable: false });
+      expect(err.costUsd).toBeCloseTo(0.0002, 10);
+      expect(err.message).toMatch(/^Model call failed: endpoint's response (is not JSON|has no string "intent" field)$/);
+    }
+  });
+
+  it("sends an endpoint's answer to the Claude judge and adds the judge's cost", async () => {
+    handler = answer("card_arrival");
+    const create = vi
+      .fn()
+      .mockResolvedValueOnce(message(JSON.stringify({ reasoning: "Same intent.", pass: true }), "end_turn", { input_tokens: 400, output_tokens: 40 }));
+    const { result, attempts } = await runCase(fakeClient(create), { ...endpointReq, grader: "judge", expected: "card arrival" }, retry);
+    expect(attempts).toBe(2);
+    expect(result).toMatchObject({ pass: true, reasoning: "Same intent.", output: "card_arrival" });
+    expect(result.cost_usd).toBeCloseTo(0.0002 + (400 * 4 + 40 * 20) / 1e6, 10);
+    expect(create).toHaveBeenCalledTimes(1);
+    expect(create.mock.calls[0][0].model).toBe("claude-opus-5-5");
+    expect(create.mock.calls[0][0].messages[0].content).toContain("<model_output>\ncard_arrival\n</model_output>");
+  });
+
+  it("errors the case, without a call, when the endpoint is no longer configured", async () => {
+    const err = await runCase(fakeClient(vi.fn()), { ...endpointReq, model: "endpoint:gone" }, retry).catch((e) => e);
+    expect(err).toMatchObject({ kind: "model", attempts: 0, retryable: false });
+    expect(err.message).toBe("endpoint:gone is not configured in EVALBOARD_ENDPOINTS.");
+    expect(bodies).toEqual([]);
+  });
+
+  it("errors the case with the config's problem when the config is broken", async () => {
+    vi.stubEnv("EVALBOARD_ENDPOINTS", '{"tunebench": {"url": "ftp://x.test"}}');
+    const err = await runCase(fakeClient(vi.fn()), endpointReq, retry).catch((e) => e);
+    expect(err).toMatchObject({ kind: "model", retryable: false });
+    expect(err.message).toMatch(/^EVALBOARD_ENDPOINTS: "tunebench".url must be an http or https URL/);
   });
 });

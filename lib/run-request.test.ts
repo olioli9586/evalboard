@@ -112,4 +112,30 @@ describe("parseCreateRuns", () => {
     expect(error({ ...five, models: ["claude-sonnet-4-6"], effort: "xhigh" })).toMatch(/claude-sonnet-4-6 doesn't take effort "xhigh"/);
     expect(parseCreateRuns({ ...five, models: ["claude-sonnet-4-6"], effort: "max" }, 20)).toMatchObject({ effort: "max" });
   });
+
+  it("accepts a custom endpoint only when the server has it configured", () => {
+    const configured = ["endpoint:tunebench-modernbert"];
+    const withEndpoint = { ...base, models: ["claude-haiku-5-5", "endpoint:tunebench-modernbert"] };
+    expect(parseCreateRuns(withEndpoint, 20, configured)).toMatchObject({
+      models: ["claude-haiku-5-5", "endpoint:tunebench-modernbert"],
+    });
+    expect(error(withEndpoint)).toMatch(/Unknown model: endpoint:tunebench-modernbert/);
+    const other = (m: string) => {
+      const r = parseCreateRuns({ ...base, models: [m] }, 20, configured);
+      return "error" in r ? r.error : "";
+    };
+    // A request names an endpoint; it can never bring its own URL.
+    for (const m of ["endpoint:other", "endpoint:", "endpoint:https://evil.test/predict", "https://evil.test/predict"]) {
+      expect(other(m)).toMatch(/Unknown model/);
+    }
+    expect(parseCreateRuns({ ...base, models: [...configured, ...configured] }, 20, configured)).toEqual({
+      error: "Each model may appear only once.",
+    });
+  });
+
+  it("takes no effort level for an endpoint model", () => {
+    const r = parseCreateRuns({ ...base, models: ["endpoint:t"], effort: "low" }, 20, ["endpoint:t"]);
+    expect(r).toEqual({ error: 'endpoint:t doesn\'t take effort "low".' });
+    expect(parseCreateRuns({ ...base, models: ["endpoint:t"], effort: null }, 20, ["endpoint:t"])).toMatchObject({ effort: null });
+  });
 });

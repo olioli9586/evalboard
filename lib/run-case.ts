@@ -1,10 +1,12 @@
 import Anthropic, { NotFoundError } from "@anthropic-ai/sdk";
-import { cost, exactMatch, type CaseResult, type Effort, type GraderKind } from "./eval";
+import { callEndpoint, EndpointError, findEndpoint, type Endpoint } from "./endpoints";
+import { cost, exactMatch, isEndpointModel, type CaseResult, type Effort, type GraderKind } from "./eval";
 import { isRetryable, NO_RETRY, retryAfterMs, withRetry, type RetryOptions } from "./retry";
 
 // ---------------------------------------------------------------------------
-// Run one case: call the target model, then grade the output. The queue
-// worker calls it once per case.
+// Run one case: call the target model (a Claude model, or a custom HTTP
+// endpoint from lib/endpoints.ts), then grade the output. The queue worker
+// calls it once per case.
 // ---------------------------------------------------------------------------
 
 export const FALLBACK_MODEL = "claude-opus-5-5";
@@ -25,7 +27,7 @@ export interface CaseRequest {
 }
 
 // Why a case could not be scored. Retryable causes (429, 5xx, a dropped
-// connection) may work later; the rest (a refusal, a 400, a timeout, an
+// connection) may work later; the rest (a refusal, a 400, a model timeout, an
 // unreadable verdict) would fail the same way again, so the worker records the
 // case as errored and moves on. costUsd is what the calls that did answer cost
 // before the failure, so an errored case still counts toward the spend cap.
@@ -52,17 +54,58 @@ export class CaseError extends Error {
   }
 }
 
+// The target's answer and what it took, before grading.
+type Answer = Pick<CaseResult, "output" | "latency_ms" | "input_tokens" | "output_tokens" | "cost_usd" | "model_used">;
+
+type Call = <T>(fn: () => Promise<T>) => Promise<T>;
+
 export async function runCase(
   client: Anthropic,
   req: CaseRequest,
   retry: RetryOptions = NO_RETRY,
 ): Promise<{ result: CaseResult; attempts: number }> {
   const tally = { attempts: 0 };
-  const call = <T>(fn: () => Promise<T>) => withRetry(fn, retry, tally);
+  const call: Call = (fn) => withRetry(fn, retry, tally);
 
-  // --- 1. Run the case on the target model (fallback to Opus 5.5 on 404) ---
-  // Latency is the successful call alone: counting backoff waits would make a
-  // rate-limited model look slow.
+  // --- 1. Run the case on the target model ---
+  const answer = isEndpointModel(req.model)
+    ? await answerFromEndpoint(req, call, tally)
+    : await answerFromClaude(client, req, call, tally);
+  const { output } = answer;
+  let cost_usd = answer.cost_usd;
+
+  // --- 2. Grade ---
+  let pass: boolean;
+  let reasoning = "";
+  if (req.grader === "exact") {
+    pass = exactMatch(output, req.expected);
+  } else {
+    let verdict: Awaited<ReturnType<typeof judge>>;
+    try {
+      verdict = await judge(client, { ...req, output }, call);
+    } catch (err) {
+      throw new CaseError(`Grading failed: ${detail(err)}`, "judge", tally.attempts, {
+        cause: err,
+        costUsd: cost_usd + (err instanceof VerdictError ? err.costUsd : 0),
+      });
+    }
+    pass = verdict.pass;
+    reasoning = verdict.reasoning;
+    cost_usd += verdict.cost_usd;
+  }
+
+  return { result: { ...answer, pass, reasoning, cost_usd }, attempts: tally.attempts };
+}
+
+// A Claude model, with a fallback to Opus 5.5 if the requested one is retired
+// (404). Latency is the successful call alone: counting backoff waits would
+// make a rate-limited model look slow.
+async function answerFromClaude(
+  client: Anthropic,
+  req: CaseRequest,
+  call: Call,
+  tally: { attempts: number },
+): Promise<Answer> {
   let modelUsed = req.model;
   let latency_ms = 0;
   const complete = async (model: string) => {
@@ -86,7 +129,7 @@ export async function runCase(
 
   const input_tokens = response.usage.input_tokens;
   const output_tokens = response.usage.output_tokens;
-  let cost_usd = cost(modelUsed, input_tokens, output_tokens);
+  const cost_usd = cost(modelUsed, input_tokens, output_tokens);
 
   if (response.stop_reason === "refusal") {
     throw new CaseError("The model declined this case.", "refusal", tally.attempts, { costUsd: cost_usd });
@@ -104,39 +147,49 @@ export async function runCase(
       costUsd: cost_usd,
     });
   }
+  return { output, latency_ms, input_tokens, output_tokens, cost_usd, model_used: modelUsed };
+}
 
-  // --- 2. Grade ---
-  let pass: boolean;
-  let reasoning = "";
-  if (req.grader === "exact") {
-    pass = exactMatch(output, req.expected);
-  } else {
-    let verdict: Awaited<ReturnType<typeof judge>>;
-    try {
-      verdict = await judge(client, { ...req, output }, call);
-    } catch (err) {
-      throw new CaseError(`Grading failed: ${detail(err)}`, "judge", tally.attempts, {
-        cause: err,
-        costUsd: cost_usd + (err instanceof VerdictError ? err.costUsd : 0),
-      });
-    }
-    pass = verdict.pass;
-    reasoning = verdict.reasoning;
-    cost_usd += verdict.cost_usd;
+// A custom HTTP endpoint: one POST per case, no tokens, a flat price per
+// call, and nothing to fall back to. Latency is the successful call, as for
+// Claude. The endpoint is looked up when the case runs, so a run whose
+// endpoint has since left the config errors its cases with that reason.
+async function answerFromEndpoint(req: CaseRequest, call: Call, tally: { attempts: number }): Promise<Answer> {
+  let endpoint: Endpoint | undefined;
+  try {
+    endpoint = findEndpoint(req.model);
+  } catch (err) {
+    throw new CaseError(detail(err), "model", tally.attempts, { cause: err });
   }
-
+  if (!endpoint) {
+    throw new CaseError(`${req.model} is not configured in EVALBOARD_ENDPOINTS.`, "model", tally.attempts);
+  }
+  const callCost = endpoint.usdPer1k / 1000;
+  let latency_ms = 0;
+  let output: string;
+  try {
+    output = await call(async () => {
+      const started = Date.now();
+      const answer = await callEndpoint(endpoint, { text: req.input, system: req.system });
+      latency_ms = Date.now() - started;
+      return answer;
+    });
+  } catch (err) {
+    // An answer without a usable output still ran on the endpoint, like a
+    // refused Claude call.
+    const answered = err instanceof EndpointError && err.failure === "response";
+    throw new CaseError(`Model call failed: ${detail(err)}`, "model", tally.attempts, {
+      cause: err,
+      costUsd: answered ? callCost : 0,
+    });
+  }
   return {
-    result: {
-      output,
-      pass,
-      reasoning,
-      latency_ms,
-      input_tokens,
-      output_tokens,
-      cost_usd,
-      model_used: modelUsed,
-    },
-    attempts: tally.attempts,
+    output: output.trim(),
+    latency_ms,
+    input_tokens: 0,
+    output_tokens: 0,
+    cost_usd: callCost,
+    model_used: req.model,
   };
 }
 

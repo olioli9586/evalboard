@@ -7,6 +7,7 @@ import {
   NotFoundError,
   RateLimitError,
 } from "@anthropic-ai/sdk";
+import { EndpointError } from "./endpoints";
 import { backoffMs, isRetryable, retryAfterMs, withRetry, type RetryOptions } from "./retry";
 
 function apiError(status: number, headers: Record<string, string> = {}) {
@@ -49,6 +50,15 @@ describe("isRetryable", () => {
     expect(isRetryable(apiError(500, { "x-should-retry": "false" }))).toBe(false);
     expect(isRetryable(apiError(400, { "x-should-retry": "true" }))).toBe(true);
   });
+
+  it("retries an endpoint's 429, 5xx, dropped connection or timeout, and nothing else", () => {
+    const status = (n: number) => new EndpointError(`endpoint answered ${n}`, "status", n, new Headers());
+    for (const n of [429, 500, 502, 503]) expect(isRetryable(status(n))).toBe(true);
+    for (const n of [307, 400, 404, 408, 409, 422]) expect(isRetryable(status(n))).toBe(false);
+    expect(isRetryable(new EndpointError("could not reach the endpoint", "connection"))).toBe(true);
+    expect(isRetryable(new EndpointError("endpoint did not answer within 30 s", "timeout"))).toBe(true);
+    expect(isRetryable(new EndpointError("endpoint's response is not JSON", "response"))).toBe(false);
+  });
 });
 
 describe("retryAfterMs", () => {
@@ -59,6 +69,12 @@ describe("retryAfterMs", () => {
     const ms = retryAfterMs(apiError(429, { "retry-after": soon }))!;
     expect(ms).toBeGreaterThan(8_000);
     expect(ms).toBeLessThanOrEqual(10_000);
+  });
+
+  it("reads an endpoint's retry-after too", () => {
+    const busy = new EndpointError("endpoint answered 503", "status", 503, new Headers({ "retry-after": "2" }));
+    expect(retryAfterMs(busy)).toBe(2000);
+    expect(retryAfterMs(new EndpointError("could not reach the endpoint", "connection"))).toBeUndefined();
   });
 
   it("is undefined without a usable header", () => {

@@ -1,10 +1,13 @@
-import { afterAll, beforeEach, describe, expect, it } from "vitest";
+import http from "node:http";
+import type { AddressInfo } from "node:net";
+import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
+import type Anthropic from "@anthropic-ai/sdk";
 import { BadRequestError, RateLimitError } from "@anthropic-ai/sdk";
 import type pg from "pg";
 import type { EvalCase } from "./eval";
 import { idempotencyKey, type BatchMessage } from "./queue";
-import { CaseError, type CaseRequest } from "./run-case";
-import { createRuns, getRun, reopenRun, runSummary, upsertDataset } from "./store";
+import { CaseError, runCase as realRunCase, type CaseRequest } from "./run-case";
+import { createRuns, getRun, listResults, reopenRun, runSummary, upsertDataset } from "./store";
 import { closeTestPool, freshDb } from "./test-db";
 import { ERROR_CASE_FROM_DELIVERY, MAX_DELIVERIES, processBatch, queueRetry, RetryLaterError, type WorkerDeps } from "./worker";
 
@@ -207,6 +210,58 @@ describe("processBatch", () => {
     await queue.enqueue({ runId: run.id, seq: 0 });
     await drain(queue, deps(queue, async (req) => (efforts.push(req.effort), runCase(req))));
     expect(efforts).toEqual(["low", "low", "low"]);
+  });
+
+  it("runs a custom endpoint model through the real runCase and stores it like any model", async () => {
+    // The endpoint answers like the fake model, and rejects case 5 outright.
+    const server = http.createServer((req, res) => {
+      let body = "";
+      req.on("data", (c) => (body += c));
+      req.on("end", () => {
+        const { text } = JSON.parse(body);
+        if (text === "case 5") return res.writeHead(422).end();
+        const i = Number(text.match(/\d+/)[0]);
+        res.end(JSON.stringify({ intent: text.includes("wrong") ? "nope" : `answer ${i}`, confidence: 0.9 }));
+      });
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}/predict`;
+    vi.stubEnv("EVALBOARD_ENDPOINTS", JSON.stringify({ tunebench: { url, output_field: "intent", usd_per_1k: 1 } }));
+    try {
+      const ds = await upsertDataset(db, { name: "fake", source: "custom", cases: CASES });
+      const [run] = await createRuns(db, {
+        datasetId: ds.id,
+        groupId: crypto.randomUUID(),
+        grader: "exact",
+        totalCases: CASES.length,
+        variants: [{ model: "endpoint:tunebench", systemPrompt: "Answer." }],
+      });
+      const queue = new MemoryQueue();
+      // No Claude call happens for an exact-match endpoint run.
+      const client = { messages: { create: vi.fn() } } as unknown as Anthropic;
+      await queue.enqueue({ runId: run.id, seq: 0 });
+      await drain(queue, deps(queue, (req) => realRunCase(client, req)));
+
+      expect((await getRun(db, run.id))!.status).toBe("succeeded");
+      const summary = await runSummary(db, run.id);
+      expect(summary).toMatchObject({ done: 12, graded: 11, passed: 8, errored: 1 });
+      expect(summary.costUsd).toBeCloseTo(11 * 0.001, 10);
+      const results = await listResults(db, run.id);
+      expect(results.find((r) => r.position === 0)).toMatchObject({
+        output: "answer 0",
+        pass: true,
+        inputTokens: 0,
+        outputTokens: 0,
+        modelUsed: "endpoint:tunebench",
+      });
+      expect(results.find((r) => r.position === 5)).toMatchObject({
+        pass: null,
+        error: "Model call failed: endpoint answered 422",
+      });
+    } finally {
+      vi.unstubAllEnvs();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
   });
 
   it("writes each case once when the same batch is delivered twice at the same time", async () => {

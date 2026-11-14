@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { NextRequest } from "next/server";
 import { getPool, withTransaction } from "@/lib/db";
+import { endpointModels } from "@/lib/endpoints";
 import {
   adminAccess,
   clientIp,
@@ -53,6 +54,15 @@ export async function POST(req: NextRequest) {
   if (!process.env.ANTHROPIC_API_KEY) {
     return Response.json({ error: "ANTHROPIC_API_KEY is not configured." }, { status: 500 });
   }
+  // A broken endpoint config refuses every launch with its reason, rather
+  // than launching as if the endpoints didn't exist.
+  let endpoints: string[];
+  try {
+    endpoints = endpointModels();
+  } catch (err) {
+    console.error("[runs]", err);
+    return Response.json({ error: (err as Error).message }, { status: 500 });
+  }
   const access = adminAccess(req.headers.get("authorization"));
   if (access === "invalid") {
     return Response.json({ error: "Invalid admin token." }, { status: 401 });
@@ -65,7 +75,7 @@ export async function POST(req: NextRequest) {
   } catch {
     return Response.json({ error: "Invalid JSON body." }, { status: 400 });
   }
-  const parsed = parseCreateRuns(body, admin ? MAX_ADMIN_CASES : MAX_PUBLIC_CASES);
+  const parsed = parseCreateRuns(body, admin ? MAX_ADMIN_CASES : MAX_PUBLIC_CASES, endpoints);
   if ("error" in parsed) {
     return Response.json({ error: parsed.error }, { status: 400 });
   }
